@@ -134,7 +134,8 @@ add_action(
 );
 
 function zioma_perf_dequeue() {
-	if ( ! zioma_perf_active() ) {
+	// The login page and other screens that never run the main query are left alone.
+	if ( ! did_action( 'wp' ) || ! zioma_perf_active() ) {
 		return;
 	}
 	$config = zioma_perf_config();
