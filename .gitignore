@@ -1,0 +1,27 @@
+# همه چیز بیرون، مگر آنچه صریحاً اجازه داده شده
+/*
+!/.gitignore
+!/CLAUDE.md
+!/reports/
+!/db/
+
+!/public_html/
+/public_html/*
+!/public_html/.htaccess
+!/public_html/robots.txt
+!/public_html/wp-config.php
+!/public_html/php.ini
+!/public_html/.user.ini
+
+!/public_html/wp-content/
+/public_html/wp-content/*
+!/public_html/wp-content/mu-plugins/
+!/public_html/wp-content/themes/
+/public_html/wp-content/themes/*
+!/public_html/wp-content/themes/*child*/
+
+*.sql
+*.zip
+*.csv
+*.log
+.env
