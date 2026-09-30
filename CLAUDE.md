@@ -15,7 +15,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
   - `cache-compat.php`: keeps XHR requests out of the LiteSpeed page cache.
 - `public_html/.htaccess`: our rules sit in the `# BEGIN Zioma` block, outside the WordPress and LiteSpeed blocks.
 - `reports/`: audit and progress reports for the client (Persian).
-- Secrets in `wp-config.php` are replaced with `REMOVED`; keep it that way.
+- The GitHub repo is public. Keep secrets in `wp-config.php` as `REMOVED`, and never commit the commercial parent theme, settings exports or HAR files (they can hold keys and session cookies).
 
 ## Checks
 

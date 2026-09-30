@@ -4,7 +4,6 @@
 !/CLAUDE.md
 !/reports/
 !/db/
-!/snapshots/
 
 !/public_html/
 /public_html/*
@@ -17,13 +16,9 @@
 !/public_html/wp-content/
 /public_html/wp-content/*
 !/public_html/wp-content/mu-plugins/
-!/public_html/wp-content/advanced-cache.php
-!/public_html/wp-content/object-cache.php
-!/public_html/wp-content/db.php
 !/public_html/wp-content/themes/
 /public_html/wp-content/themes/*
 !/public_html/wp-content/themes/*child*/
-!/public_html/wp-content/themes/parskala/
 
 *.sql
 *.zip
