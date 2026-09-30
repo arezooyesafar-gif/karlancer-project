@@ -1,4 +1,14 @@
 
+# BEGIN Zioma
+# درخواست‌های Ajax (هدر X-Requested-With) نباید نسخهٔ کش‌شدهٔ صفحه را از LiteSpeed بگیرند.
+# توضیح کامل: wp-content/themes/parskala-child/inc/cache-compat.php
+<IfModule LiteSpeed>
+RewriteEngine On
+RewriteCond %{HTTP:X-Requested-With} ^XMLHttpRequest$ [NC]
+RewriteRule .* - [E=Cache-Control:no-cache]
+</IfModule>
+# END Zioma
+
 # BEGIN WordPress
 # دستورالعمل‌های (خطوط) بین "BEGIN WordPress" و "END WordPress"
 # به طور پویا تولید شده‌اند، و فقط باید به وسیلهٔ صافی‌های وردرپرس ویرایش شوند.

@@ -12,7 +12,7 @@
 
 
 
-define( 'ITSEC_ENCRYPTION_KEY', 'PSp7bzI6dWIxQUNjVEhoeG1tcishQXNWPF9QMlZFTEUpM2xKSDhlVVVCfTlpTiFrbntHYXFAQlouUTwgb0NsSA==' );
+define( 'ITSEC_ENCRYPTION_KEY', 'REMOVED' );
  // Added by WP Rocket
  // Added by WP Rocket
 /**
@@ -91,7 +91,7 @@ define( 'WP_DEBUG_DISPLAY', false );
 @ini_set( 'display_errors', 0 );
 /* Add any custom values between this line and the "stop editing" line. */
 
-define( 'DUPLICATOR_AUTH_KEY', 'g7.8AJ{j`61V1Vj1R@D><cQM|U<[u7n`|N_%_CU;@LkQ`DDESL/78MVr7jaKEfS>' );
+define( 'DUPLICATOR_AUTH_KEY', 'REMOVED' );
 
 
 /* That's all, stop editing! Happy publishing. */
