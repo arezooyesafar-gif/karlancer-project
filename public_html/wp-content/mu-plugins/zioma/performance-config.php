@@ -105,26 +105,25 @@ return array(
 		// so this rule only ever matches a modal that is already closed, and an
 		// open modal still wins the cascade.
 		'all' => 'html .prk-modal{display:none}',
+
+		// Product-page CLS (~0.27 → 0.005, confirmed on ?zioma_trial=1): the
+		// reviews and questions lists are rendered in full, then
+		// product-gallery.js hides every item past the 4th on DOMContentLoaded
+		// (hideExtras: items beyond data-visible-count, default 4, get
+		// display:none), which shrinks the tab and, through scroll anchoring,
+		// shoves the whole product shell up. This pins the same collapsed state
+		// from first paint. It is scoped with the exact flag the script sets when
+		// "show more" is tapped (data-expanded="1"), so an expanded list is never
+		// hidden and the button keeps working.
+		'product' => '#comments-wrap:not([data-expanded="1"]) > .comment:nth-child(n+5){display:none}' . "\n" .
+			'#questions-wrap:not([data-expanded="1"]) > .question:nth-child(n+5){display:none}',
 	),
 
 	// Rules still being verified: printed only on ?zioma_trial=1, whatever the
 	// 'critical_css' switch is, so they can be checked on the live site without
 	// affecting ordinary visitors. Move one into 'critical_css_rules' above once
-	// the client confirms it on a ?zioma_trial=1 page.
-	'critical_css_trial_rules' => array(
-		// Product-page CLS (~0.27): the reviews and questions lists are rendered
-		// in full, then product-gallery.js hides every item past the 4th on
-		// DOMContentLoaded (hideExtras: items beyond data-visible-count, default
-		// 4, get display:none), which shrinks the tab below the fold and, through
-		// scroll anchoring, shoves the whole product shell up. This pins the same
-		// collapsed state from first paint. It is scoped with the exact flag the
-		// script sets when "show more" is tapped (data-expanded="1"), so an
-		// expanded list is never hidden and the button keeps working. nth-child
-		// assumes the first four children are the visible items (the script's
-		// default count), which the trial URL is for confirming before go-live.
-		'product' => '#comments-wrap:not([data-expanded="1"]) > .comment:nth-child(n+5){display:none}' . "\n" .
-			'#questions-wrap:not([data-expanded="1"]) > .question:nth-child(n+5){display:none}',
-	),
+	// it is confirmed on a ?zioma_trial=1 page.
+	'critical_css_trial_rules' => array(),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
 	// 'context'. The two text fonts every page uses, so they download next to
