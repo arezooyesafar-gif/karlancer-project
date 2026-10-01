@@ -62,7 +62,7 @@ return array(
 	'delay_timeout'         => 20,
 
 	// Removing the files below: 'off', 'trial' (only with ?zioma_trial=1) or 'on'.
-	'asset_trims'           => 'trial',
+	'asset_trims'           => 'on',
 
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the

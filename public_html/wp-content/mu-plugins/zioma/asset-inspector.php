@@ -533,6 +533,87 @@ add_action(
 					});
 				};
 			}
+
+			// Page timings, layout shifts, long frames and element size changes, for
+			// finding what moves the page (CLS) and what keeps the main thread busy (TBT).
+			var perf = log.perf = { shifts: [], frames: [], resizes: [], fcp: null, lcp: null };
+
+			function observe(type, callback) {
+				try {
+					new PerformanceObserver(function (list) { list.getEntries().forEach(callback); }).observe({ type: type, buffered: true });
+					return true;
+				} catch (e) {
+					return false;
+				}
+			}
+
+			observe('paint', function (e) {
+				if ('first-contentful-paint' === e.name) {
+					perf.fcp = Math.round(e.startTime);
+				}
+			});
+			observe('largest-contentful-paint', function (e) {
+				perf.lcp = { t: Math.round(e.startTime), el: e.element, url: e.url || '' };
+			});
+			observe('layout-shift', function (e) {
+				if (!e.hadRecentInput) {
+					perf.shifts.push({ t: Math.round(e.startTime), value: e.value, sources: (e.sources || []).map(function (s) {
+						return { el: s.node, from: s.previousRect, to: s.currentRect };
+					}) });
+				}
+			});
+			var loaf = observe('long-animation-frame', function (e) {
+				var end = e.startTime + e.duration;
+				var scripts = (e.scripts || []).slice().sort(function (a, b) { return b.duration - a.duration; });
+				perf.frames.push({
+					t: Math.round(e.startTime),
+					ms: Math.round(e.duration),
+					blocking: Math.round(e.blockingDuration || 0),
+					script: Math.round(scripts.reduce(function (sum, s) { return sum + s.duration; }, 0)),
+					render: e.renderStart ? Math.round(end - e.renderStart) : 0,
+					layout: e.styleAndLayoutStart ? Math.round(end - e.styleAndLayoutStart) : 0,
+					top: scripts.slice(0, 3)
+				});
+			});
+			if (!loaf) {
+				observe('longtask', function (e) {
+					perf.frames.push({ t: Math.round(e.startTime), ms: Math.round(e.duration), blocking: Math.round(e.duration - 50), script: '', render: '', layout: '', top: [] });
+				});
+			}
+
+			// Height changes of 16 px or more on any element, to see what grew or
+			// shrank just before a layout shift. Elements are watched as they are added.
+			if (window.ResizeObserver && window.MutationObserver && window.WeakMap) {
+				var heights = new WeakMap();
+				var resize = new ResizeObserver(function (entries) {
+					var t = Math.round(performance.now());
+					entries.forEach(function (entry) {
+						var box = entry.borderBoxSize && entry.borderBoxSize[0];
+						var height = Math.round(box ? box.blockSize : entry.contentRect.height);
+						var old = heights.get(entry.target);
+						heights.set(entry.target, height);
+						if (undefined !== old && Math.abs(height - old) >= 16 && perf.resizes.length < 1000) {
+							perf.resizes.push({ t: t, el: entry.target, from: old, to: height });
+						}
+					});
+				});
+				var skip = /^(SCRIPT|STYLE|LINK|META|NOSCRIPT|BR|TEMPLATE|TITLE|HEAD)$/i;
+				var watch = function (el) {
+					if (1 === el.nodeType && !skip.test(el.tagName) && !el.ownerSVGElement) {
+						resize.observe(el);
+					}
+				};
+				new MutationObserver(function (list) {
+					list.forEach(function (m) {
+						Array.prototype.forEach.call(m.addedNodes, function (node) {
+							if (1 === node.nodeType) {
+								watch(node);
+								Array.prototype.forEach.call(node.querySelectorAll('*'), watch);
+							}
+						});
+					});
+				}).observe(document.documentElement, { childList: true, subtree: true });
+			}
 		})();
 		</script>
 		<?php
@@ -677,8 +758,74 @@ add_action(
 					list.appendChild(item);
 				});
 			}
+			var perf = log.perf || { shifts: [], frames: [], resizes: [] };
+
+			function describe(el) {
+				if (!el || 1 !== el.nodeType) {
+					return '(removed element)';
+				}
+				var parts = [];
+				for (var i = 0; el && 1 === el.nodeType && i < 3; i++, el = el.parentElement) {
+					var classes = 'string' === typeof el.className ? el.className.trim().split(/\s+/).slice(0, 3).join('.') : '';
+					parts.unshift(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (classes ? '.' + classes : ''));
+					if (el.id) {
+						break;
+					}
+				}
+				return parts.join(' > ');
+			}
+			function depth(el) {
+				for (var d = 0; el; d++) {
+					el = el.parentElement;
+				}
+				return d;
+			}
+			function short(url) {
+				return String(url || '').split('?')[0].replace(location.origin, '');
+			}
+			function inPanel(el) {
+				return el && el.closest && el.closest('#zioma-assets');
+			}
+			function cls() {
+				return perf.shifts.reduce(function (sum, s) { return sum + s.value; }, 0);
+			}
+			function perfLines() {
+				var nav = performance.getEntriesByType('navigation')[0];
+				var resources = performance.getEntriesByType('resource');
+				var lines = ['', 'PAGE', 'viewport ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio + 'x | FCP ' + perf.fcp + ' ms | LCP ' + (perf.lcp ? perf.lcp.t + ' ms ' + describe(perf.lcp.el) + ' ' + short(perf.lcp.url) : '-') + ' | DOMContentLoaded ' + (nav ? Math.round(nav.domContentLoadedEventStart) : '-') + ' ms | load ' + (nav ? Math.round(nav.loadEventStart) : '-') + ' ms'];
+
+				lines.push('', 'LAYOUT SHIFTS (total ' + cls().toFixed(3) + '; time, score, element moved: y and height before -> after; then what changed size or finished loading just before)');
+				perf.shifts.forEach(function (shift) {
+					lines.push(shift.t + ' ms\t' + shift.value.toFixed(3) + '\t' + shift.sources.map(function (s) {
+						return describe(s.el) + ' y ' + Math.round(s.from.y) + '->' + Math.round(s.to.y) + ' h ' + Math.round(s.from.height) + '->' + Math.round(s.to.height);
+					}).join(' | '));
+					perf.resizes.filter(function (r) {
+						return r.t >= shift.t - 500 && r.t <= shift.t + 250 && !inPanel(r.el);
+					}).sort(function (a, b) {
+						return Math.abs(b.to - b.from) - Math.abs(a.to - a.from) || depth(b.el) - depth(a.el);
+					}).slice(0, 10).forEach(function (r) {
+						lines.push('    size at ' + r.t + ' ms: ' + describe(r.el) + ' h ' + r.from + '->' + r.to);
+					});
+					resources.filter(function (r) {
+						return r.responseEnd <= shift.t && r.responseEnd >= shift.t - 600;
+					}).slice(-6).forEach(function (r) {
+						lines.push('    loaded at ' + Math.round(r.responseEnd) + ' ms: ' + r.initiatorType + ' ' + short(r.name));
+					});
+				});
+
+				var blocking = perf.frames.reduce(function (sum, f) { return sum + (f.blocking || 0); }, 0);
+				lines.push('', 'LONG FRAMES over 50 ms (' + perf.frames.length + ', blocking ' + blocking + ' ms; start, length, blocking, scripts, render, style+layout, longest scripts)');
+				perf.frames.slice(0, 60).forEach(function (f) {
+					lines.push(f.t + ' ms\t' + f.ms + ' ms\tblocking ' + f.blocking + '\tscripts ' + f.script + '\trender ' + f.render + '\tstyle+layout ' + f.layout + '\t' + f.top.map(function (s) {
+						return Math.round(s.duration) + ' ms ' + (s.invoker || s.invokerType || '') + ' @ ' + short(s.sourceURL) + (s.sourceFunctionName ? ' ' + s.sourceFunctionName : '') + (s.forcedStyleAndLayoutDuration ? ' (forced layout ' + Math.round(s.forcedStyleAndLayoutDuration) + ' ms)' : '');
+					}).join(' | '));
+				});
+
+				return lines;
+			}
+
 			function refresh() {
-				document.getElementById('zioma-live').textContent = log.errors.length + ' errors, ' + log.requests.length + ' requests';
+				document.getElementById('zioma-live').textContent = log.errors.length + ' errors, ' + log.requests.length + ' requests, CLS ' + cls().toFixed(3) + ', ' + perf.frames.length + ' long frames';
 				fill('zioma-errors', log.errors);
 				fill('zioma-requests', log.requests.map(request));
 			}
@@ -693,6 +840,7 @@ add_action(
 					.concat(server, ['', 'FILES', keys.join('\t')])
 					.concat(assets.map(function (a) { return keys.map(function (k) { return a[k]; }).join('\t'); }))
 					.concat(['', 'ERRORS'], log.errors, ['', 'REQUESTS (method, status, time, type, x-litespeed-cache, size, full page?, url)'], log.requests.map(request))
+					.concat(perfLines())
 					.join('\n');
 				function showBox() {
 					box.parentNode.open = true;
