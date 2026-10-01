@@ -28,17 +28,24 @@ function zioma_assets_elapsed() {
 }
 
 /**
- * CPU seconds (user + system) this PHP process has used so far. Wall time
- * much larger than CPU time means the request was waiting: on the network,
- * DNS, disk, the database or a sleep.
+ * CPU seconds (user + system) used since this plugin loaded. Wall time much
+ * larger than CPU time means the request was waiting: for a CPU share, on the
+ * network, DNS, disk or the database. PHP workers serve many requests, so the
+ * process total is offset by its value at load time.
  */
 function zioma_assets_cpu() {
+	static $start = null;
+
 	$usage = function_exists( 'getrusage' ) ? getrusage() : array();
 	if ( ! isset( $usage['ru_utime.tv_sec'] ) ) {
 		return 0.0;
 	}
+	$total = $usage['ru_utime.tv_sec'] + $usage['ru_utime.tv_usec'] / 1e6 + $usage['ru_stime.tv_sec'] + $usage['ru_stime.tv_usec'] / 1e6;
+	if ( null === $start ) {
+		$start = $total;
+	}
 
-	return $usage['ru_utime.tv_sec'] + $usage['ru_utime.tv_usec'] / 1e6 + $usage['ru_stime.tv_sec'] + $usage['ru_stime.tv_usec'] / 1e6;
+	return $total - $start;
 }
 
 /**
@@ -109,6 +116,10 @@ function zioma_assets_http_end( $response, $context, $class, $args, $url ) {
  * Readable name of a hook callback, with the file it lives in when known.
  */
 function zioma_assets_callback_name( $callback ) {
+	if ( $callback instanceof Closure && isset( $GLOBALS['zioma_server']['wrapped'][ spl_object_id( $callback ) ] ) ) {
+		$callback = $GLOBALS['zioma_server']['wrapped'][ spl_object_id( $callback ) ];
+	}
+
 	try {
 		if ( is_string( $callback ) && false === strpos( $callback, '::' ) ) {
 			$reflection = new ReflectionFunction( $callback );
@@ -220,7 +231,7 @@ function zioma_assets_time_callbacks() {
 		foreach ( $entries as $key => $entry ) {
 			$original = $entry['function'];
 
-			$GLOBALS['wp_filter'][ $hook ]->callbacks[ $priority ][ $key ]['function'] = function ( ...$args ) use ( $original, $hook, $priority ) {
+			$wrapper = function ( ...$args ) use ( $original, $hook, $priority ) {
 				$start   = microtime( true );
 				$result  = call_user_func_array( $original, $args );
 				$seconds = microtime( true ) - $start;
@@ -234,6 +245,9 @@ function zioma_assets_time_callbacks() {
 
 				return $result;
 			};
+
+			$GLOBALS['zioma_server']['wrapped'][ spl_object_id( $wrapper ) ] = $original;
+			$GLOBALS['wp_filter'][ $hook ]->callbacks[ $priority ][ $key ]['function'] = $wrapper;
 		}
 	}
 }
@@ -258,6 +272,7 @@ function zioma_assets_plugin_loaded( $file ) {
 // Recorded for every request with the parameter, from as early as a mu-plugin
 // can hook in; zioma_assets_inspecting() decides later whether it is shown.
 if ( isset( $_GET['zioma_assets'] ) ) {
+	zioma_assets_cpu(); // Sets the CPU baseline.
 	$GLOBALS['zioma_server'] = array(
 		'loaded_at' => zioma_assets_elapsed(),
 		'mark'      => array( zioma_assets_elapsed(), zioma_assets_cpu() ),
@@ -268,6 +283,7 @@ if ( isset( $_GET['zioma_assets'] ) ) {
 		'callbacks' => array(),
 		'plugins'   => array(),
 		'pairs'     => array(),
+		'wrapped'   => array(),
 	);
 	add_action( 'all', 'zioma_assets_gap_probe', 10, 2 );
 	add_action( 'mu_plugin_loaded', 'zioma_assets_plugin_loaded', PHP_INT_MIN );
@@ -330,7 +346,7 @@ function zioma_assets_server_lines() {
 	}
 	$server = $GLOBALS['zioma_server'];
 	$lines  = array(
-		sprintf( 'Built in %.2f s up to the footer (CPU %.2f s), %d database queries', zioma_assets_elapsed(), zioma_assets_cpu(), get_num_queries() ),
+		sprintf( 'Built in %.2f s up to the footer (CPU %.2f s after this plugin loaded), %d database queries', zioma_assets_elapsed(), zioma_assets_cpu(), get_num_queries() ),
 		zioma_assets_environment(),
 		sprintf(
 			'Server tweaks: %s, active on this request: %s',
@@ -468,10 +484,11 @@ add_action(
 				return consoleError.apply(console, arguments);
 			};
 
-			function record(method, url, status, type, cache, body) {
+			function record(method, url, status, type, cache, body, started) {
 				log.requests.push({
 					method: String(method || 'GET').toUpperCase(),
 					status: status,
+					ms: Math.round(performance.now() - started),
 					type: String(type || '').split(';')[0],
 					litespeed: cache || '',
 					kb: Math.round(body.length / 102.4) / 10,
@@ -482,15 +499,16 @@ add_action(
 
 			var open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
 			XMLHttpRequest.prototype.open = function (method, url) {
-				this.ziomaRequest = { method: method, url: String(url) };
+				this.ziomaRequest = { method: method, url: String(url), started: performance.now() };
 				return open.apply(this, arguments);
 			};
 			XMLHttpRequest.prototype.send = function () {
 				var xhr = this, info = xhr.ziomaRequest;
 				if (info) {
+					info.started = performance.now();
 					xhr.addEventListener('loadend', function () {
 						var text = ('' === xhr.responseType || 'text' === xhr.responseType) ? xhr.responseText : '';
-						record(info.method, info.url, xhr.status || 'failed', xhr.getResponseHeader('content-type'), xhr.getResponseHeader('x-litespeed-cache'), text || '');
+						record(info.method, info.url, xhr.status || 'failed', xhr.getResponseHeader('content-type'), xhr.getResponseHeader('x-litespeed-cache'), text || '', info.started);
 					});
 				}
 				return send.apply(this, arguments);
@@ -501,13 +519,14 @@ add_action(
 				window.fetch = function (input, init) {
 					var url = String((input && input.url) || input);
 					var method = (init && init.method) || (input && input.method) || 'GET';
+					var started = performance.now();
 					return fetch.apply(this, arguments).then(function (response) {
 						response.clone().text().then(function (text) {
-							record(method, url, response.status, response.headers.get('content-type'), response.headers.get('x-litespeed-cache'), text);
+							record(method, url, response.status, response.headers.get('content-type'), response.headers.get('x-litespeed-cache'), text, started);
 						}, function () {});
 						return response;
 					}, function (error) {
-						record(method, url, 'failed', '', '', '');
+						record(method, url, 'failed', '', '', '', started);
 						throw error;
 					});
 				};
@@ -645,7 +664,7 @@ add_action(
 			var log = window.ziomaDebug || { errors: [], requests: [] };
 
 			function request(r) {
-				return [r.method, r.status, r.type, r.litespeed, r.kb + ' KB', r.full_page, r.url].join('\t');
+				return [r.method, r.status, r.ms + ' ms', r.type, r.litespeed, r.kb + ' KB', r.full_page, r.url].join('\t');
 			}
 			function fill(id, lines) {
 				var list = document.getElementById(id);
@@ -671,7 +690,7 @@ add_action(
 				var text = ['URL: ' + location.href, 'Contexts: ' + contexts.join(', '), 'Browser: ' + navigator.userAgent, '', 'SERVER']
 					.concat(server, ['', 'FILES', keys.join('\t')])
 					.concat(assets.map(function (a) { return keys.map(function (k) { return a[k]; }).join('\t'); }))
-					.concat(['', 'ERRORS'], log.errors, ['', 'REQUESTS (method, status, type, x-litespeed-cache, size, full page?, url)'], log.requests.map(request))
+					.concat(['', 'ERRORS'], log.errors, ['', 'REQUESTS (method, status, time, type, x-litespeed-cache, size, full page?, url)'], log.requests.map(request))
 					.join('\n');
 				function showBox() {
 					box.parentNode.open = true;

@@ -42,7 +42,7 @@ return array(
 	// Server-side tweaks that make uncached pages build faster without
 	// changing their output: 'off', 'trial' (only on URLs with ?zioma_trial=1,
 	// to compare in the inspector first) or 'on'.
-	'server_tweaks'         => 'trial',
+	'server_tweaks'         => 'on',
 
 	// Options unserialized once per request instead of on every get_option()
 	// (see options-memo.php). prk_option is the theme's settings array.
