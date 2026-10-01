@@ -43,6 +43,26 @@ function zioma_perf_active() {
 }
 
 /**
+ * Whether the server-side tweaks (options-memo.php, plugin-filter.php) run on
+ * this request. 'server_tweaks' in the config is 'off', 'trial' (only with
+ * ?zioma_trial=1 in the URL, to compare before switching on) or 'on'.
+ * Safe to call while plugins are still loading.
+ */
+function zioma_server_tweaks_active() {
+	$config = zioma_perf_config();
+	$mode   = isset( $config['server_tweaks'] ) ? $config['server_tweaks'] : 'off';
+
+	if ( empty( $config['enabled'] ) || ( defined( 'ZIOMA_PERF_DISABLED' ) && ZIOMA_PERF_DISABLED ) ) {
+		return false;
+	}
+	if ( isset( $_GET['zioma_perf'] ) && 'off' === $_GET['zioma_perf'] ) {
+		return false;
+	}
+
+	return 'on' === $mode || ( 'trial' === $mode && isset( $_GET['zioma_trial'] ) );
+}
+
+/**
  * Contexts the current request belongs to; keys of the config maps.
  */
 function zioma_perf_contexts() {

@@ -332,6 +332,11 @@ function zioma_assets_server_lines() {
 	$lines  = array(
 		sprintf( 'Built in %.2f s up to the footer (CPU %.2f s), %d database queries', zioma_assets_elapsed(), zioma_assets_cpu(), get_num_queries() ),
 		zioma_assets_environment(),
+		sprintf(
+			'Server tweaks: %s, active on this request: %s',
+			isset( zioma_perf_config()['server_tweaks'] ) ? zioma_perf_config()['server_tweaks'] : 'off',
+			function_exists( 'zioma_server_tweaks_active' ) && zioma_server_tweaks_active() ? 'yes' : 'no'
+		),
 		sprintf( 'This plugin loaded at %s s (before that: PHP start, wp-config, WordPress core, drop-ins, earlier mu-plugins)', $server['loaded_at'] ),
 	);
 

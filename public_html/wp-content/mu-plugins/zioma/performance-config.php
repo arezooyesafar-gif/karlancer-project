@@ -26,9 +26,9 @@
 defined( 'ABSPATH' ) || exit;
 
 return array(
-	'enabled'         => true,
+	'enabled'               => true,
 
-	'tweaks'          => array(
+	'tweaks'                => array(
 		// Modern browsers render emoji natively; the detection script only adds a request.
 		'disable_emojis'      => true,
 		// RSD, WLW manifest, generator and shortlink tags in <head>.
@@ -39,17 +39,30 @@ return array(
 		'eager_product_cards' => 4,
 	),
 
+	// Server-side tweaks that make uncached pages build faster without
+	// changing their output: 'off', 'trial' (only on URLs with ?zioma_trial=1,
+	// to compare in the inspector first) or 'on'.
+	'server_tweaks'         => 'trial',
+
+	// Options unserialized once per request instead of on every get_option()
+	// (see options-memo.php). prk_option is the theme's settings array.
+	'memoize_options'       => array( 'prk_option' ),
+
+	// Plugins not loaded on visitor page views and wc-ajax calls; wp-admin,
+	// admin-ajax, cron, REST and login still load them (see plugin-filter.php).
+	'frontend_skip_plugins' => array( 'duplicator-pro/duplicator-pro.php' ),
+
 	// 'context' => array( 'style-handle', ... )
-	'dequeue_styles'  => array(),
+	'dequeue_styles'        => array(),
 
 	// 'context' => array( 'script-handle', ... )
-	'dequeue_scripts' => array(),
+	'dequeue_scripts'       => array(),
 
 	// Script handles to load with defer (WordPress 6.3+ keeps dependency order).
-	'defer_scripts'   => array(),
+	'defer_scripts'         => array(),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
 	// 'context'. Example:
 	// array( 'href' => '/wp-content/themes/parskala/assets/fonts/x.woff2', 'as' => 'font', 'type' => 'font/woff2', 'crossorigin' => 'anonymous' ),
-	'preload'         => array(),
+	'preload'               => array(),
 );
