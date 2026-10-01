@@ -28,6 +28,20 @@ function zioma_assets_elapsed() {
 }
 
 /**
+ * CPU seconds (user + system) this PHP process has used so far. Wall time
+ * much larger than CPU time means the request was waiting: on the network,
+ * DNS, disk, the database or a sleep.
+ */
+function zioma_assets_cpu() {
+	$usage = function_exists( 'getrusage' ) ? getrusage() : array();
+	if ( ! isset( $usage['ru_utime.tv_sec'] ) ) {
+		return 0.0;
+	}
+
+	return $usage['ru_utime.tv_sec'] + $usage['ru_utime.tv_usec'] / 1e6 + $usage['ru_stime.tv_sec'] + $usage['ru_stime.tv_usec'] / 1e6;
+}
+
+/**
  * Scheme, host and path of a URL; the query string is dropped because it can
  * carry API keys.
  */
@@ -166,6 +180,15 @@ function zioma_assets_gap_probe( $hook, $first_arg = null ) {
 		? $hook . '(' . basename( dirname( $first_arg ) ) . '/' . basename( $first_arg ) . ')'
 		: $hook;
 
+	if ( null !== $last_time ) {
+		$pair = $last_hook . ' → ' . $label;
+		if ( ! isset( $GLOBALS['zioma_server']['pairs'][ $pair ] ) ) {
+			$GLOBALS['zioma_server']['pairs'][ $pair ] = array( 0.0, 0 );
+		}
+		$GLOBALS['zioma_server']['pairs'][ $pair ][0] += $now - $last_time;
+		++$GLOBALS['zioma_server']['pairs'][ $pair ][1];
+	}
+
 	if ( null !== $last_time && $now - $last_time > 0.2 ) {
 		$GLOBALS['zioma_server']['gaps'][] = array(
 			'seconds' => round( $now - $last_time, 2 ),
@@ -215,24 +238,46 @@ function zioma_assets_time_callbacks() {
 	}
 }
 
+/**
+ * Wall and CPU time each plugin file took to load, measured from one
+ * plugin_loaded / mu_plugin_loaded to the next.
+ */
+function zioma_assets_plugin_loaded( $file ) {
+	$now = zioma_assets_elapsed();
+	$cpu = zioma_assets_cpu();
+	$server = &$GLOBALS['zioma_server'];
+
+	$server['plugins'][] = array(
+		'plugin'  => basename( dirname( $file ) ) . '/' . basename( $file ),
+		'seconds' => round( $now - $server['mark'][0], 2 ),
+		'cpu'     => round( $cpu - $server['mark'][1], 2 ),
+	);
+	$server['mark'] = array( $now, $cpu );
+}
+
 // Recorded for every request with the parameter, from as early as a mu-plugin
 // can hook in; zioma_assets_inspecting() decides later whether it is shown.
 if ( isset( $_GET['zioma_assets'] ) ) {
 	$GLOBALS['zioma_server'] = array(
 		'loaded_at' => zioma_assets_elapsed(),
+		'mark'      => array( zioma_assets_elapsed(), zioma_assets_cpu() ),
 		'stages'    => array(),
 		'http'      => array(),
 		'pending'   => array(),
 		'gaps'      => array(),
 		'callbacks' => array(),
+		'plugins'   => array(),
+		'pairs'     => array(),
 	);
 	add_action( 'all', 'zioma_assets_gap_probe', 10, 2 );
+	add_action( 'mu_plugin_loaded', 'zioma_assets_plugin_loaded', PHP_INT_MIN );
+	add_action( 'plugin_loaded', 'zioma_assets_plugin_loaded', PHP_INT_MIN );
 
 	foreach ( array( 'plugins_loaded', 'after_setup_theme', 'init', 'wp_loaded', 'wp', 'template_redirect', 'wp_enqueue_scripts', 'wp_head', 'wp_footer' ) as $zioma_hook ) {
 		add_action(
 			$zioma_hook,
 			function () use ( $zioma_hook ) {
-				$GLOBALS['zioma_server']['stages'][ $zioma_hook ] = zioma_assets_elapsed();
+				$GLOBALS['zioma_server']['stages'][ $zioma_hook ] = array( zioma_assets_elapsed(), zioma_assets_cpu() );
 			},
 			PHP_INT_MIN
 		);
@@ -285,16 +330,29 @@ function zioma_assets_server_lines() {
 	}
 	$server = $GLOBALS['zioma_server'];
 	$lines  = array(
-		sprintf( 'Built in %.2f s up to the footer, %d database queries', zioma_assets_elapsed(), get_num_queries() ),
+		sprintf( 'Built in %.2f s up to the footer (CPU %.2f s), %d database queries', zioma_assets_elapsed(), zioma_assets_cpu(), get_num_queries() ),
 		zioma_assets_environment(),
 		sprintf( 'This plugin loaded at %s s (before that: PHP start, wp-config, WordPress core, drop-ins, earlier mu-plugins)', $server['loaded_at'] ),
 	);
 
 	$stages = array();
-	foreach ( $server['stages'] as $hook => $seconds ) {
-		$stages[] = $hook . ' ' . $seconds . ' s';
+	foreach ( $server['stages'] as $hook => $at ) {
+		$stages[] = sprintf( '%s %.2f s (CPU %.2f)', $hook, $at[0], $at[1] );
 	}
 	$lines[] = 'Stage start times: ' . implode( ', ', $stages );
+
+	$plugins = $server['plugins'];
+	usort(
+		$plugins,
+		function ( $a, $b ) {
+			return $b['seconds'] <=> $a['seconds'];
+		}
+	);
+	foreach ( $plugins as $plugin ) {
+		if ( $plugin['seconds'] >= 0.05 ) {
+			$lines[] = sprintf( 'PLUGIN LOAD %s s (CPU %s s) %s', $plugin['seconds'], $plugin['cpu'], $plugin['plugin'] );
+		}
+	}
 
 	foreach ( $server['pending'] as $calls ) {
 		foreach ( $calls as $call ) {
@@ -334,6 +392,23 @@ function zioma_assets_server_lines() {
 	}
 	if ( ! $gaps ) {
 		$lines[] = 'No stretch over 0.2 s without a hook.';
+	}
+
+	// Where the time between consecutive hooks adds up, e.g. inside every product card.
+	$pairs = array_filter(
+		$server['pairs'],
+		function ( $pair ) {
+			return $pair[0] >= 0.1;
+		}
+	);
+	uasort(
+		$pairs,
+		function ( $a, $b ) {
+			return $b[0] <=> $a[0];
+		}
+	);
+	foreach ( array_slice( $pairs, 0, 20, true ) as $between => $pair ) {
+		$lines[] = sprintf( 'TOTAL %.2f s over %d times between %s', $pair[0], $pair[1], $between );
 	}
 
 	return $lines;
