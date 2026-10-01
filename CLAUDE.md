@@ -14,9 +14,15 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
   - `performance-config.php`: per-context lists of style/script handles to dequeue, defer or preload. Find handles on the live site with `?zioma_assets=1` (admin only). Compare a page without the changes using `?zioma_perf=off`.
   - `asset-inspector.php`: the `?zioma_assets=1` bar; also records JS errors, failed files and Ajax/fetch requests, and copies everything as a text report the user pastes back.
   - `cache-compat.php`: keeps XHR requests out of the LiteSpeed page cache.
+  - `lazyload.php`: excludes the main product image and the first product cards from LiteSpeed lazy-load (via `litespeed_media_lazy_img_excludes`).
 - `public_html/.htaccess`: our rules sit in the `# BEGIN Zioma` block, outside the WordPress and LiteSpeed blocks.
 - `reports/`: audit and progress reports for the client (Persian).
 - The GitHub repo is public. Keep secrets in `wp-config.php` as `REMOVED`, and never commit the commercial parent theme, settings exports or HAR files (they can hold keys and session cookies).
+
+## What we know about the live site
+
+- zioma.ir (88.135.68.10, in Iran) resets connections from outside Iran, so this environment cannot open it. Data comes from the user: Lighthouse JSON from their Chrome, inspector reports, screenshots. Analysis: `reports/03-lighthouse-analysis.md`.
+- WordPress 7.1.x, WooCommerce 10.9, Elementor 4.1, theme files under `themes/parskala/app/...`. LiteSpeed Cache is active (its lazy-load runs) but pages showed 4–11 s TTFB.
 
 ## Checks
 

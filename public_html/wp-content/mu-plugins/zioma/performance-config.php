@@ -30,9 +30,13 @@ return array(
 
 	'tweaks'          => array(
 		// Modern browsers render emoji natively; the detection script only adds a request.
-		'disable_emojis' => true,
+		'disable_emojis'      => true,
 		// RSD, WLW manifest, generator and shortlink tags in <head>.
-		'clean_head'     => true,
+		'clean_head'          => true,
+		// Stop LiteSpeed lazy-loading the main product image and the first
+		// product cards on shop/category pages (see lazyload.php).
+		'eager_above_fold'    => true,
+		'eager_product_cards' => 4,
 	),
 
 	// 'context' => array( 'style-handle', ... )
