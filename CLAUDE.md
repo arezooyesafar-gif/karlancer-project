@@ -23,7 +23,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
 
 - zioma.ir (88.135.68.10, in Iran) resets connections from outside Iran, so this environment cannot open it. Data comes from the user: Lighthouse JSON from their Chrome, inspector reports, screenshots. Analysis: `reports/03-lighthouse-analysis.md`.
 - WordPress 7.1.x, WooCommerce 10.9, Elementor 4.1, PHP 8.1.34, theme files under `themes/parskala/app/...`. LiteSpeed page cache works (`x-litespeed-cache: hit` on repeat views); cache misses take 4–11 s TTFB.
-- The server cannot reach WordPress.org (plugin installs fail). Query Monitor on a category page (admin, uncached): 11.5 s total, 709 queries taking only 1.0 s, no WP HTTP API calls. So ~10 s is PHP work or raw network/DNS calls outside the WP HTTP API. The inspector's SERVER section lists the slowest callbacks on stage hooks, stretches over 0.2 s without any hook, and outgoing HTTP requests, each with the plugin or theme file.
+- The server cannot reach WordPress.org (plugin installs fail). Query Monitor on a category page (admin, uncached): 11.5 s total, 709 queries taking only 1.0 s, no WP HTTP API calls. So ~10 s is PHP work or raw network/DNS calls outside the WP HTTP API. First inspector report (cooking-equipment, admin, uncached, 34.6 s, 785 queries): plugins_loaded started at 4.4 s, init took 2.2 s, and wp_head→wp_footer (page body render) took 25.2 s. The inspector's SERVER section lists the slowest callbacks on stage hooks, stretches over 0.2 s without any hook, and outgoing HTTP requests, each with the plugin or theme file.
 
 ## Checks
 

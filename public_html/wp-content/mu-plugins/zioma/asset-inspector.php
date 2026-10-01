@@ -219,6 +219,7 @@ function zioma_assets_time_callbacks() {
 // can hook in; zioma_assets_inspecting() decides later whether it is shown.
 if ( isset( $_GET['zioma_assets'] ) ) {
 	$GLOBALS['zioma_server'] = array(
+		'loaded_at' => zioma_assets_elapsed(),
 		'stages'    => array(),
 		'http'      => array(),
 		'pending'   => array(),
@@ -244,6 +245,38 @@ if ( isset( $_GET['zioma_assets'] ) ) {
 }
 
 /**
+ * PHP settings that decide how fast PHP itself runs.
+ */
+function zioma_assets_environment() {
+	$parts = array( 'PHP ' . PHP_VERSION );
+
+	$status = function_exists( 'opcache_get_status' ) ? @opcache_get_status( false ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( is_array( $status ) && ! empty( $status['opcache_enabled'] ) ) {
+		$memory  = $status['memory_usage'];
+		$parts[] = sprintf(
+			'OPcache on (hit rate %.1f%%, %d scripts, %d of %d MB used%s)',
+			$status['opcache_statistics']['opcache_hit_rate'],
+			$status['opcache_statistics']['num_cached_scripts'],
+			$memory['used_memory'] / 1048576,
+			( $memory['used_memory'] + $memory['free_memory'] + $memory['wasted_memory'] ) / 1048576,
+			empty( $status['cache_full'] ) ? '' : ', FULL'
+		);
+	} elseif ( is_array( $status ) || ! extension_loaded( 'Zend OPcache' ) ) {
+		$parts[] = 'OPcache OFF';
+	} else {
+		$parts[] = 'OPcache loaded, status hidden (opcache.enable=' . ini_get( 'opcache.enable' ) . ')';
+	}
+
+	if ( extension_loaded( 'xdebug' ) ) {
+		$parts[] = 'Xdebug LOADED';
+	}
+	$parts[] = 'object cache: ' . ( wp_using_ext_object_cache() ? 'persistent' : 'none' );
+	$parts[] = 'peak memory ' . round( memory_get_peak_usage() / 1048576, 1 ) . ' MB';
+
+	return implode( ' | ', $parts );
+}
+
+/**
  * Plain-text lines describing how this page was built on the server.
  */
 function zioma_assets_server_lines() {
@@ -251,7 +284,11 @@ function zioma_assets_server_lines() {
 		return array();
 	}
 	$server = $GLOBALS['zioma_server'];
-	$lines  = array( sprintf( 'Built in %.2f s up to the footer, %d database queries', zioma_assets_elapsed(), get_num_queries() ) );
+	$lines  = array(
+		sprintf( 'Built in %.2f s up to the footer, %d database queries', zioma_assets_elapsed(), get_num_queries() ),
+		zioma_assets_environment(),
+		sprintf( 'This plugin loaded at %s s (before that: PHP start, wp-config, WordPress core, drop-ins, earlier mu-plugins)', $server['loaded_at'] ),
+	);
 
 	$stages = array();
 	foreach ( $server['stages'] as $hook => $seconds ) {
