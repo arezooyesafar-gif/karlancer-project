@@ -10,9 +10,12 @@
  * every rule matches the element's settled, script-applied state, so the page
  * looks the same from the first paint instead of only after the JS catches up.
  *
- * Rules live in performance-config.php under 'critical_css_rules' (a
- * context => CSS map) and obey the 'critical_css' mode switch (off / trial /
- * on) and the admin ?zioma_perf=off escape hatch.
+ * Confirmed rules live in performance-config.php under 'critical_css_rules'
+ * (a context => CSS map) and obey the 'critical_css' mode switch (off / trial
+ * / on). Rules still being verified live under 'critical_css_trial_rules' and
+ * are printed only on URLs with ?zioma_trial=1, whatever the main switch is, so
+ * a new rule can be checked on the live site without touching the ones already
+ * running for every visitor. Both honour the admin ?zioma_perf=off escape hatch.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -21,19 +24,31 @@ add_action(
 	'wp_head',
 	function () {
 		// The main query has run by wp_head, so the context checks are reliable.
-		if ( ! did_action( 'wp' ) || ! zioma_perf_active() || ! zioma_mode_active( 'critical_css' ) ) {
+		if ( ! did_action( 'wp' ) || ! zioma_perf_active() ) {
 			return;
 		}
 
-		$config = zioma_perf_config();
-		if ( empty( $config['critical_css_rules'] ) ) {
-			return;
+		$config   = zioma_perf_config();
+		$contexts = zioma_perf_contexts();
+		$maps     = array();
+
+		// Confirmed rules: gated by the off / trial / on switch.
+		if ( zioma_mode_active( 'critical_css' ) && ! empty( $config['critical_css_rules'] ) ) {
+			$maps[] = $config['critical_css_rules'];
+		}
+
+		// Staging rules: only on ?zioma_trial=1, and never when the whole feature is off.
+		$mode = isset( $config['critical_css'] ) ? $config['critical_css'] : 'off';
+		if ( 'off' !== $mode && isset( $_GET['zioma_trial'] ) && ! empty( $config['critical_css_trial_rules'] ) ) {
+			$maps[] = $config['critical_css_trial_rules'];
 		}
 
 		$rules = array();
-		foreach ( zioma_perf_contexts() as $context ) {
-			if ( ! empty( $config['critical_css_rules'][ $context ] ) ) {
-				$rules[] = trim( (string) $config['critical_css_rules'][ $context ] );
+		foreach ( $maps as $map ) {
+			foreach ( $contexts as $context ) {
+				if ( ! empty( $map[ $context ] ) ) {
+					$rules[] = trim( (string) $map[ $context ] );
+				}
 			}
 		}
 
