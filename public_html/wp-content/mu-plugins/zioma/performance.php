@@ -20,6 +20,7 @@ function zioma_perf_config() {
 				'dequeue_styles'  => array(),
 				'dequeue_scripts' => array(),
 				'defer_scripts'   => array(),
+				'critical_css_rules' => array(),
 				'preload'         => array(),
 			)
 		);

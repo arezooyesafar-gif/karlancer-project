@@ -64,6 +64,14 @@ return array(
 	// Removing the files below: 'off', 'trial' (only with ?zioma_trial=1) or 'on'.
 	'asset_trims'           => 'on',
 
+	// Inline critical CSS (see critical-css.php) that pins layout-shifting
+	// elements to the state the theme's own scripts settle them into, so the
+	// page looks identical from the first paint with no cumulative layout
+	// shift. 'off', 'trial' (only with ?zioma_trial=1) or 'on'. Kept on trial
+	// until the client confirms the three mobile modals still open and nothing
+	// moved.
+	'critical_css'          => 'trial',
+
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the
 	// theme and Elementor, and Lighthouse found 99% of this file unused there.
@@ -82,6 +90,22 @@ return array(
 
 	// Script handles to load with defer (WordPress 6.3+ keeps dependency order).
 	'defer_scripts'         => array(),
+
+	// 'context' => CSS string, printed inline near the top of <head> (see
+	// critical-css.php). Each rule must reproduce the element's settled state.
+	'critical_css_rules'    => array(
+		// The mobile overlay modals (category filter, sort and search, and the
+		// product-page modals) are all .prk-modal elements that prk-modal.js
+		// builds and hides from the footer. Until that script runs (~24-31 s on
+		// a cold mobile load) they stay in the page flow at full height and then
+		// collapse to nothing, shoving the footer up — a ~1.0 CLS on category
+		// pages, ~0.28 on product pages. This hides a closed modal from the first
+		// paint, which is exactly where the script leaves it. prk-modal.js opens
+		// a modal with a stronger selector (a state class or an inline style),
+		// so this rule only ever matches a modal that is already closed, and an
+		// open modal still wins the cascade.
+		'all' => 'html .prk-modal{display:none}',
+	),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
 	// 'context'. The two text fonts every page uses, so they download next to
