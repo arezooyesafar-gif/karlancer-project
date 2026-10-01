@@ -39,6 +39,16 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
 - getrusage() CPU is per PHP worker (LSAPI reuses workers), so the inspector reports CPU relative to when the mu-plugin loaded.
 - The inspector's SERVER section now shows wall vs CPU time, per-plugin load time, slowest stage-hook callbacks, hook-less stretches over 0.2 s, totals between consecutive hooks, and outgoing HTTP requests.
 
+## Remaining work (handoff)
+
+All work is on branch `claude/adoring-faraday-d5pk2q` (no PR; the default branch does not have it). The user uploads files themselves and has little time: send finished files and short, exact steps in Persian.
+
+1. **Mobile Lighthouse (59 → realistic 90–95).** Waiting on three inspector reports taken in Chrome device mode (Pixel 7, Mid-tier mobile, F5; the panel must say "mobile"): `sam-dishwasher/?zioma_assets=1`, a product page, and `cooking-equipment/?zioma_assets=1` after scrolling to the bottom. From LAYOUT SHIFTS, find what grows above the footer (suspect: `#search-modal-mobile` sitting in the page flow ~100 ms at startup) and on product pages above `.prk-product-page-shell`. From LONG FRAMES, find what blocks. Fix with CSS/JS in the mu-plugin only, with no visible change (e.g. keep the hidden-at-start element out of the flow until its script opens it).
+2. **Bug 2: category "load more" on scroll does nothing.** The desktop report showed no request at all. Use the ARCHIVE, Main query and WATCHED ON SCROLL lines. Suspects: `found_posts` / `max_num_pages` = 0 (the page also shows "محصولی یافت نشد" next to its products), or `no_found_rows` set by some `pre_get_posts` callback or host mu-plugin. If the JS has to be read, ask the user for `themes/parskala/app/Woocommerce/ArchiveV4/assets/archive-v4.js` and keep it out of git.
+3. **Bug 1 (page loops after the footer with LiteSpeed cache):** the fix is live (`.htaccess` + `cache-compat.php`). Ask the user to confirm in an incognito window.
+4. **LiteSpeed Crawler:** confirm the user switched it on (`admin.php?page=litespeed-crawler`, see `reports/05-speed-final-steps.md`). If the server has it disabled, consider a small cache warmer in the mu-plugin.
+5. **Final report:** fill the blanks in `reports/06-final-report-draft.md` (mobile and desktop scores for home / category / product, bug status) and deliver it in Persian.
+
 ## Checks
 
 `php -l` every changed PHP file. There is no WordPress install or site access here: the user uploads changes to the host (see `reports/02-upload-and-test.md`) and pastes inspector reports back. Never upload `wp-config.php` from the repo.
