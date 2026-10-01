@@ -48,9 +48,13 @@ return array(
 	// (see options-memo.php). prk_option is the theme's settings array.
 	'memoize_options'       => array( 'prk_option' ),
 
-	// Plugins not loaded on visitor page views and wc-ajax calls; wp-admin,
-	// admin-ajax, cron, REST and login still load them (see plugin-filter.php).
-	'frontend_skip_plugins' => array( 'duplicator-pro/duplicator-pro.php' ),
+	// Admin-only plugins not loaded on visitor page views and wc-ajax calls;
+	// wp-admin, admin-ajax, cron, REST and login still load them (see
+	// plugin-filter.php). Plugin folder or folder/file.php.
+	'frontend_skip_plugins' => array(
+		'duplicator-pro',
+		'woocommerce-advanced-bulk-edit',
+	),
 
 	// 'context' => array( 'style-handle', ... )
 	'dequeue_styles'        => array(),

@@ -16,7 +16,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
   - `cache-compat.php`: keeps XHR requests out of the LiteSpeed page cache.
   - `lazyload.php`: excludes the main product image and the first product cards from LiteSpeed lazy-load (via `litespeed_media_lazy_img_excludes`).
   - `options-memo.php`: unserializes `memoize_options` (the theme's `prk_option`) once per request via `pre_option_*`; front end and Ajax only.
-  - `plugin-filter.php`: drops `frontend_skip_plugins` (Duplicator Pro) from `active_plugins` on visitor page views and wc-ajax only.
+  - `plugin-filter.php`: drops `frontend_skip_plugins` (folders or files; Duplicator Pro, WooCommerce Advanced Bulk Edit) from `active_plugins` on visitor page views and wc-ajax only.
   - Both obey `server_tweaks` in the config: `off`, `trial` (only with `?zioma_trial=1`) or `on`.
 - `public_html/.htaccess`: our rules sit in the `# BEGIN Zioma` block, outside the WordPress and LiteSpeed blocks.
 - `reports/`: audit and progress reports for the client (Persian).
@@ -28,6 +28,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
 - WordPress 7.1.x, WooCommerce 10.9, Elementor 4.1, PHP 8.1.34, theme files under `themes/parskala/app/...`. LiteSpeed page cache works (`x-litespeed-cache: hit` on repeat views); cache misses take 4–11 s TTFB.
 - The server cannot reach WordPress.org (plugin installs fail). Query Monitor on a category page (admin, uncached): 11.5 s total, 709 queries taking only 1.0 s, no WP HTTP API calls. So ~10 s is PHP work or raw network/DNS calls outside the WP HTTP API. First inspector report (cooking-equipment, admin, uncached, 34.6 s, 785 queries): plugins_loaded started at 4.4 s, init took 2.2 s, and wp_head→wp_footer (page body render) took 25.2 s. Second report (same page, Query Monitor still on, 20.5 s): OPcache on (99% hit), no persistent object cache; plugin loading ~4.3 s of which ~3.7 s is two hook-less stretches inside RTL-CareUnit (rtl-theme license manager; Storage.php then ORM.php, around options `22f91148…` and `rtl_rsm_localProducts`); init 2.4 s with `Prk\Woocommerce\MyAccountV4\MyAccountV4::register_endpoints` at 0.8 s; body render 12 s with no single stretch over 0.2 s.
 - Third report (QM off): 40.2 s wall but only 9.0 s CPU (host CPU throttling suspected); 2,801 reads of `prk_option` cost 13 s (alloptions → option_prk_option); Duplicator Pro load 8.8 s (RTL-CareUnit license code runs inside it); `MyAccountV4::register_endpoints` 2.9 s. Write-up: `reports/04-server-diagnosis.md`.
+- Trial comparison (cooking-equipment, admin): 40.3 s / CPU 8.5 s without tweaks, 19.7 s / CPU 4.2 s with `?zioma_trial=1`. The memo removed the 17 s of `prk_option` reads. Skipping Duplicator Pro moved the ~5 s RTL-CareUnit check to the next rtl-theme plugin (WooCommerce Advanced Bulk Edit), so it runs with whichever guarded plugin loads first; Bulk Edit was added to the skip list next.
 - The inspector's SERVER section now shows wall vs CPU time, per-plugin load time, slowest stage-hook callbacks, hook-less stretches over 0.2 s, totals between consecutive hooks, and outgoing HTTP requests.
 
 ## Checks

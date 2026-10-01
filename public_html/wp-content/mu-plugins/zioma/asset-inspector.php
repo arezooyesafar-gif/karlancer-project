@@ -346,6 +346,15 @@ function zioma_assets_server_lines() {
 	}
 	$lines[] = 'Stage start times: ' . implode( ', ', $stages );
 
+	// The stored list, read past any option_active_plugins filter, shows what was skipped.
+	$active  = (array) get_option( 'active_plugins', array() );
+	$stored  = (array) maybe_unserialize( $GLOBALS['wpdb']->get_var( "SELECT option_value FROM {$GLOBALS['wpdb']->options} WHERE option_name = 'active_plugins' LIMIT 1" ) );
+	$skipped = array_diff( $stored, $active );
+	$lines[] = 'Active plugins on this request: ' . implode( ', ', array_map( 'dirname', $active ) );
+	if ( $skipped ) {
+		$lines[] = 'Skipped on this request: ' . implode( ', ', array_map( 'dirname', $skipped ) );
+	}
+
 	$plugins = $server['plugins'];
 	usort(
 		$plugins,
