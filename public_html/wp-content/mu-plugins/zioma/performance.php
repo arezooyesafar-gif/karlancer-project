@@ -44,13 +44,19 @@ function zioma_perf_active() {
 
 /**
  * Whether the server-side tweaks (options-memo.php, plugin-filter.php) run on
- * this request. 'server_tweaks' in the config is 'off', 'trial' (only with
- * ?zioma_trial=1 in the URL, to compare before switching on) or 'on'.
- * Safe to call while plugins are still loading.
+ * this request. Safe to call while plugins are still loading.
  */
 function zioma_server_tweaks_active() {
+	return zioma_mode_active( 'server_tweaks' );
+}
+
+/**
+ * Whether a config switch set to 'off', 'trial' or 'on' applies to this
+ * request; 'trial' means only on URLs with ?zioma_trial=1.
+ */
+function zioma_mode_active( $key ) {
 	$config = zioma_perf_config();
-	$mode   = isset( $config['server_tweaks'] ) ? $config['server_tweaks'] : 'off';
+	$mode   = isset( $config[ $key ] ) ? $config[ $key ] : 'off';
 
 	if ( empty( $config['enabled'] ) || ( defined( 'ZIOMA_PERF_DISABLED' ) && ZIOMA_PERF_DISABLED ) ) {
 		return false;
@@ -155,7 +161,7 @@ add_action(
 
 function zioma_perf_dequeue() {
 	// The login page and other screens that never run the main query are left alone.
-	if ( ! did_action( 'wp' ) || ! zioma_perf_active() ) {
+	if ( ! did_action( 'wp' ) || ! zioma_perf_active() || ! zioma_mode_active( 'asset_trims' ) ) {
 		return;
 	}
 	$config = zioma_perf_config();

@@ -61,11 +61,24 @@ return array(
 	'delay_scripts'         => array( 'googletagmanager.com/gtag/js' ),
 	'delay_timeout'         => 20,
 
+	// Removing the files below: 'off', 'trial' (only with ?zioma_trial=1) or 'on'.
+	'asset_trims'           => 'trial',
+
 	// 'context' => array( 'style-handle', ... )
-	'dequeue_styles'        => array(),
+	// Gutenberg block styles: product and category pages are built with the
+	// theme and Elementor, and Lighthouse found 99% of this file unused there.
+	'dequeue_styles'        => array(
+		'product_archive' => array( 'wp-block-library' ),
+		'product'         => array( 'wp-block-library' ),
+	),
 
 	// 'context' => array( 'script-handle', ... )
-	'dequeue_scripts'       => array(),
+	// Product review and question tabs exist only on product pages, yet the
+	// theme loads their scripts (~22 KB compressed) on home and category pages.
+	'dequeue_scripts'       => array(
+		'front_page'      => array( 'prk-reviews', 'prk-product-questions' ),
+		'product_archive' => array( 'prk-reviews', 'prk-product-questions' ),
+	),
 
 	// Script handles to load with defer (WordPress 6.3+ keeps dependency order).
 	'defer_scripts'         => array(),
