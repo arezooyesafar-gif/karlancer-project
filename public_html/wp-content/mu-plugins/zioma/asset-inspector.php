@@ -7,14 +7,144 @@
  * print order with its source, file size, inline data size, dependencies and
  * dependents, plus the contexts the page matches. It also records JavaScript
  * errors, console.error calls, files that failed to load and every Ajax/fetch
- * request with its status and LiteSpeed cache header. "Copy report" puts all
- * of it on the clipboard as plain text.
+ * request with its status and LiteSpeed cache header. On the server side it
+ * times the main WordPress stages and every outgoing HTTP request, with the
+ * plugin or theme file that made it. "Copy report" puts all of it on the
+ * clipboard as plain text.
  */
 
 defined( 'ABSPATH' ) || exit;
 
 function zioma_assets_inspecting() {
 	return isset( $_GET['zioma_assets'] ) && ! is_admin() && current_user_can( 'manage_options' );
+}
+
+/**
+ * Seconds since PHP started handling this request.
+ */
+function zioma_assets_elapsed() {
+	return round( microtime( true ) - $_SERVER['REQUEST_TIME_FLOAT'], 3 );
+}
+
+/**
+ * Scheme, host and path of a URL; the query string is dropped because it can
+ * carry API keys.
+ */
+function zioma_assets_safe_url( $url ) {
+	$parts = wp_parse_url( $url );
+	if ( empty( $parts['host'] ) ) {
+		return '(invalid url)';
+	}
+
+	return ( isset( $parts['scheme'] ) ? $parts['scheme'] . '://' : '' ) . $parts['host']
+		. ( isset( $parts['path'] ) ? $parts['path'] : '' ) . ( isset( $parts['query'] ) ? '?…' : '' );
+}
+
+/**
+ * First plugin or theme file in the call stack, e.g. "plugins/foo/foo.php:42".
+ */
+function zioma_assets_http_caller() {
+	foreach ( debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS ) as $frame ) {
+		if ( empty( $frame['file'] ) ) {
+			continue;
+		}
+		$file = wp_normalize_path( $frame['file'] );
+		if ( preg_match( '#/wp-(includes|admin)/|/mu-plugins/zioma#', $file ) ) {
+			continue;
+		}
+		$pos = strpos( $file, '/wp-content/' );
+
+		return ( false !== $pos ? substr( $file, $pos + 12 ) : basename( $file ) ) . ':' . $frame['line'];
+	}
+
+	return '';
+}
+
+function zioma_assets_http_start( $preempt, $args, $url ) {
+	$call = array(
+		'method' => isset( $args['method'] ) ? $args['method'] : 'GET',
+		'url'    => zioma_assets_safe_url( $url ),
+		'start'  => zioma_assets_elapsed(),
+		'caller' => zioma_assets_http_caller(),
+	);
+
+	if ( false !== $preempt ) {
+		$call['seconds']                   = 0;
+		$call['result']                    = 'answered by a pre_http_request filter';
+		$GLOBALS['zioma_server']['http'][] = $call;
+	} else {
+		$GLOBALS['zioma_server']['pending'][ $url ][] = $call;
+	}
+
+	return $preempt;
+}
+
+function zioma_assets_http_end( $response, $context, $class, $args, $url ) {
+	if ( 'response' !== $context || empty( $GLOBALS['zioma_server']['pending'][ $url ] ) ) {
+		return;
+	}
+	$call            = array_shift( $GLOBALS['zioma_server']['pending'][ $url ] );
+	$call['seconds'] = round( zioma_assets_elapsed() - $call['start'], 3 );
+	$call['result']  = is_wp_error( $response ) ? 'error: ' . $response->get_error_message() : 'HTTP ' . wp_remote_retrieve_response_code( $response );
+
+	$GLOBALS['zioma_server']['http'][] = $call;
+}
+
+// Recorded for every request with the parameter, from as early as a mu-plugin
+// can hook in; zioma_assets_inspecting() decides later whether it is shown.
+if ( isset( $_GET['zioma_assets'] ) ) {
+	$GLOBALS['zioma_server'] = array(
+		'stages'  => array(),
+		'http'    => array(),
+		'pending' => array(),
+	);
+
+	foreach ( array( 'plugins_loaded', 'init', 'wp_loaded', 'wp', 'template_redirect', 'wp_head', 'wp_footer' ) as $zioma_hook ) {
+		add_action(
+			$zioma_hook,
+			function () use ( $zioma_hook ) {
+				$GLOBALS['zioma_server']['stages'][ $zioma_hook ] = zioma_assets_elapsed();
+			},
+			PHP_INT_MIN
+		);
+	}
+	unset( $zioma_hook );
+
+	add_filter( 'pre_http_request', 'zioma_assets_http_start', PHP_INT_MAX, 3 );
+	add_action( 'http_api_debug', 'zioma_assets_http_end', 10, 5 );
+}
+
+/**
+ * Plain-text lines describing how this page was built on the server.
+ */
+function zioma_assets_server_lines() {
+	if ( empty( $GLOBALS['zioma_server'] ) ) {
+		return array();
+	}
+	$server = $GLOBALS['zioma_server'];
+	$lines  = array( sprintf( 'Built in %.2f s up to the footer, %d database queries', zioma_assets_elapsed(), get_num_queries() ) );
+
+	$stages = array();
+	foreach ( $server['stages'] as $hook => $seconds ) {
+		$stages[] = $hook . ' ' . $seconds . ' s';
+	}
+	$lines[] = 'Stage start times: ' . implode( ', ', $stages );
+
+	foreach ( $server['pending'] as $calls ) {
+		foreach ( $calls as $call ) {
+			$call['seconds'] = '?';
+			$call['result']  = 'no response recorded';
+			$server['http'][] = $call;
+		}
+	}
+	foreach ( $server['http'] as $call ) {
+		$lines[] = sprintf( 'HTTP %s %s | at %s s | took %s s | %s | from %s', $call['method'], $call['url'], $call['start'], $call['seconds'], $call['result'], $call['caller'] );
+	}
+	if ( ! $server['http'] ) {
+		$lines[] = 'No outgoing HTTP requests.';
+	}
+
+	return $lines;
 }
 
 add_action(
@@ -189,15 +319,22 @@ add_action(
 		$total_kb = array_sum( array_map( 'floatval', wp_list_pluck( $rows, 'kb' ) ) );
 		$columns  = array_keys( reset( $rows ) ?: array( 'type' => '' ) );
 		$box      = 'border:1px solid #ccc;padding:2px 4px;word-break:break-all';
+		$server   = zioma_assets_server_lines();
 		?>
 		<div id="zioma-assets" dir="ltr" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483647;max-height:50vh;overflow:auto;background:#fff;color:#111;font:12px/1.4 monospace;border-top:2px solid #111;text-align:left">
 			<details style="padding:6px 10px">
 				<summary style="cursor:pointer;font-weight:bold">
-					<?php printf( 'Zioma: %d files, %s KB local (uncompressed)', count( $rows ), esc_html( round( $total_kb, 1 ) ) ); ?>
+					<?php printf( 'Zioma: built in %s s | %d files, %s KB local (uncompressed)', esc_html( zioma_assets_elapsed() ), count( $rows ), esc_html( round( $total_kb, 1 ) ) ); ?>
 					| <span id="zioma-live"></span>
 					<button type="button" id="zioma-copy" style="margin-left:8px;font:inherit;cursor:pointer">Copy report</button>
 				</summary>
 				<p>Contexts: <?php echo esc_html( implode( ', ', $contexts ) ); ?></p>
+				<p><b>Server (PHP)</b></p>
+				<ol>
+					<?php foreach ( $server as $line ) : ?>
+						<li><?php echo esc_html( $line ); ?></li>
+					<?php endforeach; ?>
+				</ol>
 				<table style="border-collapse:collapse;width:100%">
 					<tr>
 						<?php foreach ( $columns as $column ) : ?>
@@ -223,6 +360,7 @@ add_action(
 		(function () {
 			var assets = <?php echo wp_json_encode( $rows, JSON_HEX_TAG | JSON_UNESCAPED_SLASHES ); ?>;
 			var contexts = <?php echo wp_json_encode( $contexts, JSON_HEX_TAG ); ?>;
+			var server = <?php echo wp_json_encode( $server, JSON_HEX_TAG | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ); ?>;
 			var log = window.ziomaDebug || { errors: [], requests: [] };
 
 			function request(r) {
@@ -249,7 +387,8 @@ add_action(
 				e.preventDefault();
 				var button = this, box = document.getElementById('zioma-report');
 				var keys = Object.keys(assets[0] || {});
-				var text = ['URL: ' + location.href, 'Contexts: ' + contexts.join(', '), 'Browser: ' + navigator.userAgent, '', 'FILES', keys.join('\t')]
+				var text = ['URL: ' + location.href, 'Contexts: ' + contexts.join(', '), 'Browser: ' + navigator.userAgent, '', 'SERVER']
+					.concat(server, ['', 'FILES', keys.join('\t')])
 					.concat(assets.map(function (a) { return keys.map(function (k) { return a[k]; }).join('\t'); }))
 					.concat(['', 'ERRORS'], log.errors, ['', 'REQUESTS (method, status, type, x-litespeed-cache, size, full page?, url)'], log.requests.map(request))
 					.join('\n');
