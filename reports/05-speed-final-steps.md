@@ -42,7 +42,16 @@
 - Guest Mode، Guest Optimization و Font Display
 - بهینه‌سازی تصویر QUIC.cloud، چون سرور به سرویس‌های خارجی دسترسی ندارد
 
-اگر در بخش Crawler پیام **disabled by server admin** دیدید، باید از میزبان‌فا بخواهید Crawler را برای حساب فعال کند.
+**محل Crawler:** Crawler یکی از تب‌های «Cache» نیست. یک **زیرمنوی جدا** در منوی کناری LiteSpeed Cache است (در ترجمهٔ فارسی «خزنده»). آدرس مستقیم آن: `https://zioma.ir/wp-admin/admin.php?page=litespeed-crawler`. این صفحه چهار تب دارد: Summary، Map، Blocklist و Settings.
+- **تب Settings:**
+  - Crawler = ON
+  - Crawl Interval = `86400`
+  - Sitemap = `https://zioma.ir/sitemap_index.xml`
+  - Server Load Limit = `1`
+  - Role Simulation و Cookie Simulation خالی بمانند.
+- **تب Summary:** یک بار **Manually run** را بزنید. بعد از آن خودکار اجرا می‌شود. وقتی Cache Mobile روشن باشد، Crawler نسخهٔ موبایل را هم جدا می‌سازد.
+
+اگر در تب Summary پیام **The crawler feature is not enabled on the LiteSpeed server** دیدید، باید از میزبان‌فا بخواهید Crawler را برای حساب فعال کند. این تنظیم سمت سرور است و از داخل وردپرس یا با کد فعال نمی‌شود.
 
 ### ج) روش درست تست
 
