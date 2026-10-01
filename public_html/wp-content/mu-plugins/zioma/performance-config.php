@@ -123,7 +123,20 @@ return array(
 	// 'critical_css' switch is, so they can be checked on the live site without
 	// affecting ordinary visitors. Move one into 'critical_css_rules' above once
 	// it is confirmed on a ?zioma_trial=1 page.
-	'critical_css_trial_rules' => array(),
+	'critical_css_trial_rules' => array(
+		// Mobile home scores 38 only because the main thread spends ~11 s in
+		// Style & Layout and ~8 s in Rendering (script eval is only ~2 s): the
+		// page's DOM is large and the browser lays all of it out at load, even
+		// what is far below the fold. content-visibility:auto tells the browser
+		// to skip layout and paint for an off-screen container until it is
+		// scrolled near, which cuts that work with no change to how the page
+		// looks. contain-intrinsic-size with the 'auto' keyword reserves a
+		// placeholder height (and remembers the real one after first render) so
+		// nothing jumps. Scoped to the theme-builder footer first — it is on
+		// every page and always below the first screen — to measure the win
+		// before widening to other below-the-fold sections.
+		'all' => 'footer#ag-theme-builder-footer{content-visibility:auto;contain-intrinsic-size:auto 1200px}',
+	),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
 	// 'context'. The two text fonts every page uses, so they download next to
