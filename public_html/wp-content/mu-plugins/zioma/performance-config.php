@@ -136,6 +136,12 @@ return array(
 		// every page and always below the first screen — to measure the win
 		// before widening to other below-the-fold sections.
 		'all' => 'footer#ag-theme-builder-footer{content-visibility:auto;contain-intrinsic-size:auto 1200px}',
+		// Product page: the specification / reviews / questions tab sections are
+		// static (no swiper) and sit well below the fold, so skipping their
+		// layout and paint until the visitor scrolls to them is safe and cuts
+		// the main-thread work with no visual change. (Related products is left
+		// out on purpose — it runs a swiper that must measure its real width.)
+		'product' => 'section#tab_specifications,section#tab_comments,section#tab_questions{content-visibility:auto;contain-intrinsic-size:auto 900px}',
 	),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
