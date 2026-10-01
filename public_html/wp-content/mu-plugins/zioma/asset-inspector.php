@@ -356,7 +356,49 @@ function zioma_assets_server_lines() {
 			zioma_mode_active( 'asset_trims' ) ? 'yes' : 'no'
 		),
 		sprintf( 'This plugin loaded at %s s (before that: PHP start, wp-config, WordPress core, drop-ins, earlier mu-plugins)', $server['loaded_at'] ),
+		sprintf(
+			'Theme: %s %s (%s) | wp_is_mobile: %s | mu-plugins: %s | drop-ins: %s',
+			wp_get_theme( get_template() )->get( 'Name' ),
+			wp_get_theme( get_template() )->get( 'Version' ),
+			get_stylesheet(),
+			wp_is_mobile() ? 'yes' : 'no',
+			implode( ', ', array_map( 'basename', wp_get_mu_plugins() ) ),
+			implode( ', ', array_filter( array( 'advanced-cache.php', 'object-cache.php', 'db.php', 'sunrise.php' ), function ( $file ) {
+				return file_exists( WP_CONTENT_DIR . '/' . $file );
+			} ) ) ?: '-'
+		),
 	);
+
+	// Paging numbers of the product list, for "load more" on category pages.
+	global $wp_query;
+	if ( $wp_query instanceof WP_Query && ( is_archive() || is_search() || is_home() ) ) {
+		$line = sprintf(
+			'Main query: %d shown, found_posts %d, max_num_pages %d, posts_per_page %s, paged %d, no_found_rows %s',
+			$wp_query->post_count,
+			$wp_query->found_posts,
+			$wp_query->max_num_pages,
+			wp_json_encode( $wp_query->get( 'posts_per_page' ) ),
+			max( 1, (int) get_query_var( 'paged' ) ),
+			$wp_query->get( 'no_found_rows' ) ? 'yes' : 'no'
+		);
+		if ( function_exists( 'wc_get_loop_prop' ) ) {
+			$line .= sprintf( ' | Woo loop: total %s, total_pages %s, current_page %s, per_page %s', wp_json_encode( wc_get_loop_prop( 'total' ) ), wp_json_encode( wc_get_loop_prop( 'total_pages' ) ), wp_json_encode( wc_get_loop_prop( 'current_page' ) ), wp_json_encode( wc_get_loop_prop( 'per_page' ) ) );
+		}
+		$lines[] = $line;
+
+		foreach ( array( 'pre_get_posts', 'woocommerce_product_query', 'loop_shop_per_page', 'posts_pre_query', 'posts_clauses', 'post_limits', 'found_posts_query', 'found_posts' ) as $hook ) {
+			if ( empty( $GLOBALS['wp_filter'][ $hook ] ) || ! $GLOBALS['wp_filter'][ $hook ] instanceof WP_Hook ) {
+				continue;
+			}
+			$names = array();
+			foreach ( $GLOBALS['wp_filter'][ $hook ]->callbacks as $priority => $entries ) {
+				foreach ( $entries as $entry ) {
+					$names[] = $priority . ' ' . zioma_assets_callback_name( $entry['function'] );
+				}
+			}
+			$lines[] = 'QUERY HOOK ' . $hook . ': ' . implode( ', ', $names );
+		}
+	}
 
 	$stages = array();
 	foreach ( $server['stages'] as $hook => $at ) {
@@ -534,6 +576,59 @@ add_action(
 				};
 			}
 
+			log.describe = function (el) {
+				if (el && 3 === el.nodeType && el.parentElement) {
+					return log.describe(el.parentElement) + ' (text)';
+				}
+				if (!el || 1 !== el.nodeType) {
+					return '(removed element)';
+				}
+				var parts = [];
+				for (var i = 0; el && 1 === el.nodeType && i < 3; i++, el = el.parentElement) {
+					var classes = 'string' === typeof el.className ? el.className.trim().split(/\s+/).slice(0, 3).join('.') : '';
+					parts.unshift(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (classes ? '.' + classes : ''));
+					if (el.id) {
+						break;
+					}
+				}
+				return parts.join(' > ');
+			};
+
+			// What scripts watch with IntersectionObserver (infinite scroll uses it) and
+			// when those elements come into view. Images and iframes are left out.
+			log.observed = [];
+			if (window.IntersectionObserver && window.Reflect) {
+				var NativeObserver = window.IntersectionObserver;
+				var note = function (text) {
+					if (log.observed.length < 200) {
+						log.observed.push(Math.round(performance.now()) + ' ms ' + text);
+					}
+				};
+				var tracked = function (el) {
+					return el && !/^(IMG|IFRAME|VIDEO|PICTURE|SOURCE)$/.test(el.tagName);
+				};
+				var Observer = function (callback, options) {
+					return Reflect.construct(NativeObserver, [function (entries, observer) {
+						entries.forEach(function (e) {
+							if (tracked(e.target)) {
+								note((e.isIntersecting ? 'in view: ' : 'out of view: ') + log.describe(e.target));
+							}
+						});
+						return callback.apply(this, arguments);
+					}, options], new.target || Observer);
+				};
+				Observer.prototype = NativeObserver.prototype;
+				Object.setPrototypeOf(Observer, NativeObserver);
+				var nativeObserve = NativeObserver.prototype.observe;
+				NativeObserver.prototype.observe = function (el) {
+					if (tracked(el)) {
+						note('watching: ' + log.describe(el));
+					}
+					return nativeObserve.apply(this, arguments);
+				};
+				window.IntersectionObserver = Observer;
+			}
+
 			// Page timings, layout shifts, long frames and element size changes, for
 			// finding what moves the page (CLS) and what keeps the main thread busy (TBT).
 			var perf = log.perf = { shifts: [], frames: [], resizes: [], fcp: null, lcp: null };
@@ -556,11 +651,9 @@ add_action(
 				perf.lcp = { t: Math.round(e.startTime), el: e.element, url: e.url || '' };
 			});
 			observe('layout-shift', function (e) {
-				if (!e.hadRecentInput) {
-					perf.shifts.push({ t: Math.round(e.startTime), value: e.value, sources: (e.sources || []).map(function (s) {
-						return { el: s.node, from: s.previousRect, to: s.currentRect };
-					}) });
-				}
+				perf.shifts.push({ t: Math.round(e.startTime), value: e.value, input: e.hadRecentInput, sources: (e.sources || []).map(function (s) {
+					return { el: s.node, from: s.previousRect, to: s.currentRect };
+				}) });
 			});
 			var loaf = observe('long-animation-frame', function (e) {
 				var end = e.startTime + e.duration;
@@ -760,20 +853,7 @@ add_action(
 			}
 			var perf = log.perf || { shifts: [], frames: [], resizes: [] };
 
-			function describe(el) {
-				if (!el || 1 !== el.nodeType) {
-					return '(removed element)';
-				}
-				var parts = [];
-				for (var i = 0; el && 1 === el.nodeType && i < 3; i++, el = el.parentElement) {
-					var classes = 'string' === typeof el.className ? el.className.trim().split(/\s+/).slice(0, 3).join('.') : '';
-					parts.unshift(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (classes ? '.' + classes : ''));
-					if (el.id) {
-						break;
-					}
-				}
-				return parts.join(' > ');
-			}
+			var describe = log.describe || function () { return '?'; };
 			function depth(el) {
 				for (var d = 0; el; d++) {
 					el = el.parentElement;
@@ -784,19 +864,26 @@ add_action(
 				return String(url || '').split('?')[0].replace(location.origin, '');
 			}
 			function inPanel(el) {
+				el = el && 3 === el.nodeType ? el.parentElement : el;
 				return el && el.closest && el.closest('#zioma-assets');
 			}
+			// Layout shifts of the page itself, leaving out this panel's own.
+			function pageShifts() {
+				return perf.shifts.filter(function (shift) {
+					return !shift.sources.length || shift.sources.some(function (s) { return s.el && !inPanel(s.el); });
+				});
+			}
 			function cls() {
-				return perf.shifts.reduce(function (sum, s) { return sum + s.value; }, 0);
+				return pageShifts().reduce(function (sum, s) { return sum + (s.input ? 0 : s.value); }, 0);
 			}
 			function perfLines() {
 				var nav = performance.getEntriesByType('navigation')[0];
 				var resources = performance.getEntriesByType('resource');
 				var lines = ['', 'PAGE', 'viewport ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio + 'x | FCP ' + perf.fcp + ' ms | LCP ' + (perf.lcp ? perf.lcp.t + ' ms ' + describe(perf.lcp.el) + ' ' + short(perf.lcp.url) : '-') + ' | DOMContentLoaded ' + (nav ? Math.round(nav.domContentLoadedEventStart) : '-') + ' ms | load ' + (nav ? Math.round(nav.loadEventStart) : '-') + ' ms'];
 
-				lines.push('', 'LAYOUT SHIFTS (total ' + cls().toFixed(3) + '; time, score, element moved: y and height before -> after; then what changed size or finished loading just before)');
-				perf.shifts.forEach(function (shift) {
-					lines.push(shift.t + ' ms\t' + shift.value.toFixed(3) + '\t' + shift.sources.map(function (s) {
+				lines.push('', 'LAYOUT SHIFTS (CLS ' + cls().toFixed(3) + '; time, score, element moved: y and height before -> after; then what changed size or finished loading just before)');
+				pageShifts().forEach(function (shift) {
+					lines.push(shift.t + ' ms\t' + shift.value.toFixed(3) + (shift.input ? ' (after input, not counted)' : '') + '\t' + shift.sources.filter(function (s) { return !inPanel(s.el); }).map(function (s) {
 						return describe(s.el) + ' y ' + Math.round(s.from.y) + '->' + Math.round(s.to.y) + ' h ' + Math.round(s.from.height) + '->' + Math.round(s.to.height);
 					}).join(' | '));
 					perf.resizes.filter(function (r) {
@@ -824,8 +911,41 @@ add_action(
 				return lines;
 			}
 
+			// Product count, paging markup and "no products" texts on archive pages,
+			// plus what scripts watched while scrolling (load more).
+			function archiveLines() {
+				if (!document.querySelector('[class*="prk-av4"], .products, .woocommerce-pagination')) {
+					return [];
+				}
+				var lines = ['', 'ARCHIVE', 'product cards: ' + document.querySelectorAll('.prk-av4-card, ul.products > li.product').length + ' | scrolled to ' + Math.round(scrollY + innerHeight) + ' of ' + document.documentElement.scrollHeight + ' px'];
+				var seen = 0;
+				Array.prototype.forEach.call(document.querySelectorAll('[class*="prk-av4"]'), function (el) {
+					var data = Object.keys(el.dataset || {});
+					if (data.length && seen++ < 15) {
+						lines.push('data on ' + describe(el) + ': ' + data.map(function (k) { return k + '=' + String(el.dataset[k]).slice(0, 120); }).join(' '));
+					}
+				});
+				var paging = document.querySelectorAll('[class*="pagination"], [class*="load-more"], [class*="loadmore"], [class*="load_more"], [class*="infinite"], [class*="sentinel"], [data-next], [data-next-page], [data-max-pages], [data-max-page], a.next.page-numbers');
+				Array.prototype.slice.call(paging, 0, 15).forEach(function (el) {
+					var box = el.getBoundingClientRect();
+					lines.push('paging ' + describe(el) + ' | ' + (box.width || box.height ? 'shown at y ' + Math.round(box.top + scrollY) : 'hidden') + ' | ' + el.outerHTML.replace(/\s+/g, ' ').slice(0, 500));
+				});
+				if (!paging.length) {
+					lines.push('no pagination or load-more element found');
+				}
+				var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT), text;
+				while ((text = walker.nextNode())) {
+					var holder = text.parentElement;
+					if (text.nodeValue.indexOf('یافت نشد') !== -1 && holder && !inPanel(holder) && !/^(SCRIPT|STYLE|TEMPLATE)$/.test(holder.tagName)) {
+						var shown = holder.getClientRects().length > 0;
+						lines.push('text "' + text.nodeValue.trim().replace(/\s+/g, ' ').slice(0, 120) + '" in ' + describe(holder) + ' | ' + (shown ? 'shown' : 'hidden'));
+					}
+				}
+				return lines.concat(['', 'WATCHED ON SCROLL (IntersectionObserver, images left out)'], (log.observed || []).slice(0, 80));
+			}
+
 			function refresh() {
-				document.getElementById('zioma-live').textContent = log.errors.length + ' errors, ' + log.requests.length + ' requests, CLS ' + cls().toFixed(3) + ', ' + perf.frames.length + ' long frames';
+				document.getElementById('zioma-live').textContent = innerWidth + ' px wide (' + (/Mobi|Android|iPhone/.test(navigator.userAgent) ? 'mobile' : 'DESKTOP') + '), ' + log.errors.length + ' errors, ' + log.requests.length + ' requests, CLS ' + cls().toFixed(3) + ', ' + perf.frames.length + ' long frames';
 				fill('zioma-errors', log.errors);
 				fill('zioma-requests', log.requests.map(request));
 			}
@@ -840,7 +960,7 @@ add_action(
 					.concat(server, ['', 'FILES', keys.join('\t')])
 					.concat(assets.map(function (a) { return keys.map(function (k) { return a[k]; }).join('\t'); }))
 					.concat(['', 'ERRORS'], log.errors, ['', 'REQUESTS (method, status, time, type, x-litespeed-cache, size, full page?, url)'], log.requests.map(request))
-					.concat(perfLines())
+					.concat(perfLines(), archiveLines())
 					.join('\n');
 				function showBox() {
 					box.parentNode.open = true;
