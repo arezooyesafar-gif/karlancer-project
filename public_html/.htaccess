@@ -1,7 +1,7 @@
 
 # BEGIN Zioma
 # درخواست‌های Ajax (هدر X-Requested-With) نباید نسخهٔ کش‌شدهٔ صفحه را از LiteSpeed بگیرند.
-# توضیح کامل: wp-content/themes/parskala-child/inc/cache-compat.php
+# توضیح کامل: wp-content/mu-plugins/zioma/cache-compat.php
 <IfModule LiteSpeed>
 RewriteEngine On
 RewriteCond %{HTTP:X-Requested-With} ^XMLHttpRequest$ [NC]

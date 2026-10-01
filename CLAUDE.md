@@ -6,11 +6,11 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
 
 - The site must look exactly the same on mobile and desktop. SEO must not change.
 - Back up before any significant change. Test on the client's test subdomain first.
-- Put customizations in the child theme or mu-plugins, never in the parent theme, so theme updates don't wipe them.
+- Put customizations in mu-plugins, never in the parent theme, so theme updates don't wipe them. The parent theme "پارس کالا" is the active theme, not the child; do not ask to switch themes (theme mods and menus are tied to the active theme).
 
 ## Layout
 
-- `public_html/wp-content/themes/parskala-child/inc/`: site code.
+- `public_html/wp-content/mu-plugins/zioma-performance.php`: loader; site code is in `mu-plugins/zioma/`.
   - `performance-config.php`: per-context lists of style/script handles to dequeue, defer or preload. Find handles on the live site with `?zioma_assets=1` (admin only). Compare a page without the changes using `?zioma_perf=off`.
   - `asset-inspector.php`: the `?zioma_assets=1` bar; also records JS errors, failed files and Ajax/fetch requests, and copies everything as a text report the user pastes back.
   - `cache-compat.php`: keeps XHR requests out of the LiteSpeed page cache.

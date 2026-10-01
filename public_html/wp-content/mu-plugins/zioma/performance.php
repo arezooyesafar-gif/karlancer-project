@@ -1,6 +1,6 @@
 <?php
 /**
- * Front-end asset trimming driven by inc/performance-config.php.
+ * Front-end asset trimming driven by performance-config.php.
  *
  * Admins can view any page untouched with ?zioma_perf=off, and
  * define( 'ZIOMA_PERF_DISABLED', true ) in wp-config.php turns it all off.

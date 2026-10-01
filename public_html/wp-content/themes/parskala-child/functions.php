@@ -2,12 +2,6 @@
 /**
  * Parskala child theme.
  *
- * Site-specific code lives in inc/ so that parent theme updates never
- * overwrite it.
+ * Site code lives in wp-content/mu-plugins/zioma-performance.php so that it
+ * runs whichever theme is active.
  */
-
-defined( 'ABSPATH' ) || exit;
-
-require_once __DIR__ . '/inc/cache-compat.php';
-require_once __DIR__ . '/inc/performance.php';
-require_once __DIR__ . '/inc/asset-inspector.php';
