@@ -66,7 +66,11 @@ return array(
 	'defer_scripts'         => array(),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
-	// 'context'. Example:
-	// array( 'href' => '/wp-content/themes/parskala/assets/fonts/x.woff2', 'as' => 'font', 'type' => 'font/woff2', 'crossorigin' => 'anonymous' ),
-	'preload'               => array(),
+	// 'context'. The two text fonts every page uses, so they download next to
+	// the CSS instead of after it (Lighthouse showed them starting ~100 ms
+	// after the stylesheets). Same files, so text looks the same.
+	'preload'               => array(
+		array( 'href' => '/wp-content/themes/parskala/fonts/iranyekan/woff2/IRANYekanX-Regular.woff2', 'as' => 'font', 'type' => 'font/woff2', 'crossorigin' => 'anonymous' ),
+		array( 'href' => '/wp-content/themes/parskala/fonts/iranyekan/woff2/IRANYekanX-DemiBold.woff2', 'as' => 'font', 'type' => 'font/woff2', 'crossorigin' => 'anonymous' ),
+	),
 );
