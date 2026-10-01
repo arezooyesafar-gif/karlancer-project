@@ -67,10 +67,10 @@ return array(
 	// Inline critical CSS (see critical-css.php) that pins layout-shifting
 	// elements to the state the theme's own scripts settle them into, so the
 	// page looks identical from the first paint with no cumulative layout
-	// shift. 'off', 'trial' (only with ?zioma_trial=1) or 'on'. Kept on trial
-	// until the client confirms the three mobile modals still open and nothing
-	// moved.
-	'critical_css'          => 'trial',
+	// shift. 'off', 'trial' (only with ?zioma_trial=1) or 'on'. Now 'on': the
+	// client confirmed on ?zioma_trial=1 that CLS dropped from 1.02 to 0, the
+	// filter/sort/search modals still open and nothing moved.
+	'critical_css'          => 'on',
 
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the
