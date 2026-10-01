@@ -56,6 +56,11 @@ return array(
 		'woocommerce-advanced-bulk-edit',
 	),
 
+	// Script URLs (any part of the src) that load on the visitor's first
+	// interaction, or after 'delay_timeout' seconds (see delay-scripts.php).
+	'delay_scripts'         => array( 'googletagmanager.com/gtag/js' ),
+	'delay_timeout'         => 20,
+
 	// 'context' => array( 'style-handle', ... )
 	'dequeue_styles'        => array(),
 

@@ -18,6 +18,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
   - `options-memo.php`: unserializes `memoize_options` (the theme's `prk_option`) once per request via `pre_option_*`; front end and Ajax only.
   - `plugin-filter.php`: drops `frontend_skip_plugins` (folders or files; Duplicator Pro, WooCommerce Advanced Bulk Edit) from `active_plugins` on visitor page views and wc-ajax only.
   - Both obey `server_tweaks` in the config: `off`, `trial` (only with `?zioma_trial=1`) or `on`.
+  - `delay-scripts.php`: output-buffer rewrite that turns `<script src>` tags matching `delay_scripts` (Google Analytics gtag.js; approved by the client) into placeholders loaded on first interaction or after `delay_timeout` seconds.
 - `public_html/.htaccess`: our rules sit in the `# BEGIN Zioma` block, outside the WordPress and LiteSpeed blocks.
 - `reports/`: audit and progress reports for the client (Persian).
 - The GitHub repo is public. Keep secrets in `wp-config.php` as `REMOVED`, and never commit the commercial parent theme, settings exports or HAR files (they can hold keys and session cookies).
