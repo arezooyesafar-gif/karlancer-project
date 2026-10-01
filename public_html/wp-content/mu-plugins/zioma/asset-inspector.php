@@ -8,9 +8,10 @@
  * dependents, plus the contexts the page matches. It also records JavaScript
  * errors, console.error calls, files that failed to load and every Ajax/fetch
  * request with its status and LiteSpeed cache header. On the server side it
- * times the main WordPress stages and every outgoing HTTP request, with the
- * plugin or theme file that made it. "Copy report" puts all of it on the
- * clipboard as plain text.
+ * times the main WordPress stages, the slowest callbacks on those stages'
+ * hooks, every outgoing HTTP request with the plugin or theme file that made
+ * it, and every stretch of more than 0.2 s in which no hook fired. "Copy
+ * report" puts all of it on the clipboard as plain text.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -90,16 +91,143 @@ function zioma_assets_http_end( $response, $context, $class, $args, $url ) {
 	$GLOBALS['zioma_server']['http'][] = $call;
 }
 
+/**
+ * Readable name of a hook callback, with the file it lives in when known.
+ */
+function zioma_assets_callback_name( $callback ) {
+	try {
+		if ( is_string( $callback ) && false === strpos( $callback, '::' ) ) {
+			$reflection = new ReflectionFunction( $callback );
+			$name       = $callback;
+		} elseif ( is_array( $callback ) || is_string( $callback ) ) {
+			list( $class, $method ) = is_array( $callback ) ? $callback : explode( '::', $callback, 2 );
+			$class                  = is_object( $class ) ? get_class( $class ) : $class;
+			$reflection             = new ReflectionMethod( $class, $method );
+			$name                   = $class . '::' . $method;
+		} elseif ( $callback instanceof Closure ) {
+			$reflection = new ReflectionFunction( $callback );
+			$name       = 'closure';
+		} else {
+			return is_object( $callback ) ? get_class( $callback ) : '?';
+		}
+	} catch ( ReflectionException $e ) {
+		return isset( $name ) ? $name : '?';
+	}
+
+	$file = wp_normalize_path( (string) $reflection->getFileName() );
+	$pos  = strpos( $file, '/wp-content/' );
+	$file = false !== $pos ? substr( $file, $pos + 12 ) : basename( $file );
+
+	return $name . ' (' . $file . ':' . $reflection->getStartLine() . ')';
+}
+
+/**
+ * Callbacks currently running, outermost hook first, e.g.
+ * "init@10: Foo::boot (plugins/foo/foo.php:12)".
+ */
+function zioma_assets_running_callbacks() {
+	$running = array_slice( (array) $GLOBALS['wp_current_filter'], 0, -1 );
+	$out     = array();
+
+	foreach ( $running as $hook ) {
+		if ( 'all' === $hook || empty( $GLOBALS['wp_filter'][ $hook ] ) || ! $GLOBALS['wp_filter'][ $hook ] instanceof WP_Hook ) {
+			continue;
+		}
+		$priority = $GLOBALS['wp_filter'][ $hook ]->current_priority();
+		if ( false === $priority || empty( $GLOBALS['wp_filter'][ $hook ]->callbacks[ $priority ] ) ) {
+			continue;
+		}
+		$entries = $GLOBALS['wp_filter'][ $hook ]->callbacks[ $priority ];
+		$names   = array_map(
+			function ( $entry ) {
+				return zioma_assets_callback_name( $entry['function'] );
+			},
+			array_slice( $entries, 0, 12 )
+		);
+		if ( count( $entries ) > 12 ) {
+			$names[] = '+' . ( count( $entries ) - 12 ) . ' more';
+		}
+		$out[] = $hook . '@' . $priority . ': ' . implode( ', ', $names );
+	}
+
+	return implode( ' > ', $out );
+}
+
+/**
+ * Hooked to 'all': notes every stretch longer than 0.2 s between two hooks,
+ * which is where a slow callback, query loop or blocking network call sits.
+ * A slow plugin file shows up as the stretch ending at its plugin_loaded.
+ */
+function zioma_assets_gap_probe( $hook, $first_arg = null ) {
+	static $last_time = null, $last_hook = '';
+
+	$now   = microtime( true );
+	$label = in_array( $hook, array( 'plugin_loaded', 'mu_plugin_loaded' ), true ) && is_string( $first_arg )
+		? $hook . '(' . basename( dirname( $first_arg ) ) . '/' . basename( $first_arg ) . ')'
+		: $hook;
+
+	if ( null !== $last_time && $now - $last_time > 0.2 ) {
+		$GLOBALS['zioma_server']['gaps'][] = array(
+			'seconds' => round( $now - $last_time, 2 ),
+			'at'      => round( $now - $_SERVER['REQUEST_TIME_FLOAT'], 2 ),
+			'between' => $last_hook . ' → ' . $label,
+			'running' => zioma_assets_running_callbacks(),
+			'fired'   => zioma_assets_http_caller(),
+		);
+	}
+
+	$last_hook = $label;
+	$last_time = microtime( true );
+}
+
+/**
+ * Runs first on each stage hook and wraps that hook's callbacks so each one
+ * is timed. Removal still works because the array keys stay the same.
+ */
+function zioma_assets_time_callbacks() {
+	$hook = current_filter();
+	if ( empty( $GLOBALS['wp_filter'][ $hook ] ) || ! $GLOBALS['wp_filter'][ $hook ] instanceof WP_Hook ) {
+		return;
+	}
+
+	foreach ( $GLOBALS['wp_filter'][ $hook ]->callbacks as $priority => $entries ) {
+		if ( PHP_INT_MIN === $priority ) {
+			continue;
+		}
+		foreach ( $entries as $key => $entry ) {
+			$original = $entry['function'];
+
+			$GLOBALS['wp_filter'][ $hook ]->callbacks[ $priority ][ $key ]['function'] = function ( ...$args ) use ( $original, $hook, $priority ) {
+				$start   = microtime( true );
+				$result  = call_user_func_array( $original, $args );
+				$seconds = microtime( true ) - $start;
+				if ( $seconds > 0.05 ) {
+					$GLOBALS['zioma_server']['callbacks'][] = array(
+						'seconds'  => round( $seconds, 2 ),
+						'hook'     => $hook . '@' . $priority,
+						'callback' => $original,
+					);
+				}
+
+				return $result;
+			};
+		}
+	}
+}
+
 // Recorded for every request with the parameter, from as early as a mu-plugin
 // can hook in; zioma_assets_inspecting() decides later whether it is shown.
 if ( isset( $_GET['zioma_assets'] ) ) {
 	$GLOBALS['zioma_server'] = array(
-		'stages'  => array(),
-		'http'    => array(),
-		'pending' => array(),
+		'stages'    => array(),
+		'http'      => array(),
+		'pending'   => array(),
+		'gaps'      => array(),
+		'callbacks' => array(),
 	);
+	add_action( 'all', 'zioma_assets_gap_probe', 10, 2 );
 
-	foreach ( array( 'plugins_loaded', 'init', 'wp_loaded', 'wp', 'template_redirect', 'wp_head', 'wp_footer' ) as $zioma_hook ) {
+	foreach ( array( 'plugins_loaded', 'after_setup_theme', 'init', 'wp_loaded', 'wp', 'template_redirect', 'wp_enqueue_scripts', 'wp_head', 'wp_footer' ) as $zioma_hook ) {
 		add_action(
 			$zioma_hook,
 			function () use ( $zioma_hook ) {
@@ -107,6 +235,7 @@ if ( isset( $_GET['zioma_assets'] ) ) {
 			},
 			PHP_INT_MIN
 		);
+		add_action( $zioma_hook, 'zioma_assets_time_callbacks', PHP_INT_MIN );
 	}
 	unset( $zioma_hook );
 
@@ -142,6 +271,32 @@ function zioma_assets_server_lines() {
 	}
 	if ( ! $server['http'] ) {
 		$lines[] = 'No outgoing HTTP requests.';
+	}
+
+	$slowest_first = function ( $a, $b ) {
+		return $b['seconds'] <=> $a['seconds'];
+	};
+
+	$callbacks = $server['callbacks'];
+	usort( $callbacks, $slowest_first );
+	foreach ( array_slice( $callbacks, 0, 15 ) as $call ) {
+		$lines[] = sprintf( 'CALLBACK %s s %s %s', $call['seconds'], $call['hook'], zioma_assets_callback_name( $call['callback'] ) );
+	}
+
+	$gaps = $server['gaps'];
+	usort( $gaps, $slowest_first );
+	foreach ( array_slice( $gaps, 0, 15 ) as $gap ) {
+		$lines[] = sprintf(
+			'SLOW %s s (ended at %s s) between %s | running: %s | next hook fired from %s',
+			$gap['seconds'],
+			$gap['at'],
+			$gap['between'],
+			'' === $gap['running'] ? '-' : $gap['running'],
+			'' === $gap['fired'] ? '-' : $gap['fired']
+		);
+	}
+	if ( ! $gaps ) {
+		$lines[] = 'No stretch over 0.2 s without a hook.';
 	}
 
 	return $lines;

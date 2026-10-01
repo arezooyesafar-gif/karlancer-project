@@ -12,7 +12,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
 
 - `public_html/wp-content/mu-plugins/zioma-performance.php`: loader; site code is in `mu-plugins/zioma/`.
   - `performance-config.php`: per-context lists of style/script handles to dequeue, defer or preload. Find handles on the live site with `?zioma_assets=1` (admin only). Compare a page without the changes using `?zioma_perf=off`.
-  - `asset-inspector.php`: the `?zioma_assets=1` bar; also records JS errors, failed files, Ajax/fetch requests, server stage timings and outgoing HTTP calls, and copies everything as a text report the user pastes back.
+  - `asset-inspector.php`: the `?zioma_assets=1` bar; also records JS errors, failed files, Ajax/fetch requests, server stage timings, slow callbacks and hook-less stretches, outgoing HTTP calls, and copies everything as a text report the user pastes back.
   - `cache-compat.php`: keeps XHR requests out of the LiteSpeed page cache.
   - `lazyload.php`: excludes the main product image and the first product cards from LiteSpeed lazy-load (via `litespeed_media_lazy_img_excludes`).
 - `public_html/.htaccess`: our rules sit in the `# BEGIN Zioma` block, outside the WordPress and LiteSpeed blocks.
@@ -23,7 +23,7 @@ Mirror of the server files we change on a WordPress + WooCommerce shop (theme: P
 
 - zioma.ir (88.135.68.10, in Iran) resets connections from outside Iran, so this environment cannot open it. Data comes from the user: Lighthouse JSON from their Chrome, inspector reports, screenshots. Analysis: `reports/03-lighthouse-analysis.md`.
 - WordPress 7.1.x, WooCommerce 10.9, Elementor 4.1, PHP 8.1.34, theme files under `themes/parskala/app/...`. LiteSpeed page cache works (`x-litespeed-cache: hit` on repeat views); cache misses take 4–11 s TTFB.
-- The server cannot reach WordPress.org (plugin installs fail), so outgoing calls to foreign hosts likely time out during page builds. The inspector's SERVER section lists every outgoing HTTP request with its duration and calling file.
+- The server cannot reach WordPress.org (plugin installs fail). Query Monitor on a category page (admin, uncached): 11.5 s total, 709 queries taking only 1.0 s, no WP HTTP API calls. So ~10 s is PHP work or raw network/DNS calls outside the WP HTTP API. The inspector's SERVER section lists the slowest callbacks on stage hooks, stretches over 0.2 s without any hook, and outgoing HTTP requests, each with the plugin or theme file.
 
 ## Checks
 
