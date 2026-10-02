@@ -86,6 +86,11 @@ return array(
 	'dequeue_scripts'       => array(
 		'front_page'      => array( 'prk-reviews', 'prk-product-questions' ),
 		'product_archive' => array( 'prk-reviews', 'prk-product-questions' ),
+		// 'jzoom' is the old jquery.elevateZoom-3.0.8 file, enqueued on product
+		// pages but 404 on the server (the file is gone). Nothing depends on it
+		// and the gallery zoom uses the theme's own elevateZoom.js, so dropping it
+		// only removes a failed request / console error — no visual change.
+		'product'         => array( 'jzoom' ),
 	),
 
 	// Script handles to load with defer (WordPress 6.3+ keeps dependency order).
