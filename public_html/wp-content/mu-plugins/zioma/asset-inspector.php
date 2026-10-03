@@ -21,6 +21,17 @@ function zioma_assets_inspecting() {
 }
 
 /**
+ * Whether this page view should record layout shifts and long frames for a
+ * logged-out visitor (?zioma_cls=1), e.g. inside PageSpeed Insights, and send
+ * them back to the site. Only page timings and element names are recorded;
+ * nothing about the server or the files. Admins read them at
+ * /wp-admin/admin-ajax.php?action=zioma_cls_view.
+ */
+function zioma_cls_recording() {
+	return isset( $_GET['zioma_cls'] ) && ! is_admin() && ! zioma_assets_inspecting();
+}
+
+/**
  * Seconds since PHP started handling this request.
  */
 function zioma_assets_elapsed() {
@@ -501,7 +512,7 @@ add_action(
 add_action(
 	'wp_head',
 	function () {
-		if ( ! zioma_assets_inspecting() ) {
+		if ( ! zioma_assets_inspecting() && ! zioma_cls_recording() ) {
 			return;
 		}
 		// First thing in <head>, and kept out of LiteSpeed/Cloudflare script optimization.
@@ -707,6 +718,71 @@ add_action(
 					});
 				}).observe(document.documentElement, { childList: true, subtree: true });
 			}
+
+			// Report text shared by the admin panel and the visitor recording.
+			var describe = log.describe;
+			function depth(el) {
+				for (var d = 0; el; d++) {
+					el = el.parentElement;
+				}
+				return d;
+			}
+			function short(url) {
+				return String(url || '').split('?')[0].replace(location.origin, '');
+			}
+			var inPanel = log.inPanel = function (el) {
+				el = el && 3 === el.nodeType ? el.parentElement : el;
+				return el && el.closest && el.closest('#zioma-assets');
+			};
+			// Layout shifts of the page itself, leaving out this panel's own.
+			function pageShifts() {
+				return perf.shifts.filter(function (shift) {
+					return !shift.sources.length || shift.sources.some(function (s) { return s.el && !inPanel(s.el); });
+				});
+			}
+			var cls = log.cls = function () {
+				return pageShifts().reduce(function (sum, s) { return sum + (s.input ? 0 : s.value); }, 0);
+			};
+			log.perfLines = function () {
+				var nav = performance.getEntriesByType('navigation')[0];
+				var resources = performance.getEntriesByType('resource');
+				var lines = ['', 'PAGE', 'viewport ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio + 'x | FCP ' + perf.fcp + ' ms | LCP ' + (perf.lcp ? perf.lcp.t + ' ms ' + describe(perf.lcp.el) + ' ' + short(perf.lcp.url) : '-') + ' | DOMContentLoaded ' + (nav ? Math.round(nav.domContentLoadedEventStart) : '-') + ' ms | load ' + (nav ? Math.round(nav.loadEventStart) : '-') + ' ms'];
+
+				lines.push('', 'LAYOUT SHIFTS (CLS ' + cls().toFixed(3) + '; time, score, element moved: y and height before -> after; then what changed size or finished loading just before)');
+				pageShifts().forEach(function (shift) {
+					lines.push(shift.t + ' ms\t' + shift.value.toFixed(3) + (shift.input ? ' (after input, not counted)' : '') + '\t' + shift.sources.filter(function (s) { return !inPanel(s.el); }).map(function (s) {
+						return describe(s.el) + ' y ' + Math.round(s.from.y) + '->' + Math.round(s.to.y) + ' h ' + Math.round(s.from.height) + '->' + Math.round(s.to.height);
+					}).join(' | '));
+					var near = perf.resizes.filter(function (r) {
+						return r.t >= shift.t - 1000 && r.t <= shift.t + 250 && !inPanel(r.el);
+					});
+					// An ancestor that grew by the same amount as a descendant only passes it on.
+					near.filter(function (r) {
+						return !near.some(function (o) {
+							return o !== r && r.el !== o.el && r.el.contains && r.el.contains(o.el) && Math.abs((o.to - o.from) - (r.to - r.from)) <= 8;
+						});
+					}).sort(function (a, b) {
+						return Math.abs(b.to - b.from) - Math.abs(a.to - a.from) || depth(b.el) - depth(a.el);
+					}).slice(0, 12).forEach(function (r) {
+						lines.push('    size at ' + r.t + ' ms: ' + describe(r.el) + ' h ' + r.from + '->' + r.to);
+					});
+					resources.filter(function (r) {
+						return r.responseEnd <= shift.t && r.responseEnd >= shift.t - 600;
+					}).slice(-6).forEach(function (r) {
+						lines.push('    loaded at ' + Math.round(r.responseEnd) + ' ms: ' + r.initiatorType + ' ' + short(r.name));
+					});
+				});
+
+				var blocking = perf.frames.reduce(function (sum, f) { return sum + (f.blocking || 0); }, 0);
+				lines.push('', 'LONG FRAMES over 50 ms (' + perf.frames.length + ', blocking ' + blocking + ' ms; start, length, blocking, scripts, render, style+layout, longest scripts)');
+				perf.frames.slice(0, 60).forEach(function (f) {
+					lines.push(f.t + ' ms\t' + f.ms + ' ms\tblocking ' + f.blocking + '\tscripts ' + f.script + '\trender ' + f.render + '\tstyle+layout ' + f.layout + '\t' + f.top.map(function (s) {
+						return Math.round(s.duration) + ' ms ' + (s.invoker || s.invokerType || '') + ' @ ' + short(s.sourceURL) + (s.sourceFunctionName ? ' ' + s.sourceFunctionName : '') + (s.forcedStyleAndLayoutDuration ? ' (forced layout ' + Math.round(s.forcedStyleAndLayoutDuration) + ' ms)' : '');
+					}).join(' | '));
+				});
+
+				return lines;
+			};
 		})();
 		</script>
 		<?php
@@ -852,63 +928,13 @@ add_action(
 				});
 			}
 			var perf = log.perf || { shifts: [], frames: [], resizes: [] };
-
 			var describe = log.describe || function () { return '?'; };
-			function depth(el) {
-				for (var d = 0; el; d++) {
-					el = el.parentElement;
-				}
-				return d;
-			}
-			function short(url) {
-				return String(url || '').split('?')[0].replace(location.origin, '');
-			}
-			function inPanel(el) {
-				el = el && 3 === el.nodeType ? el.parentElement : el;
-				return el && el.closest && el.closest('#zioma-assets');
-			}
-			// Layout shifts of the page itself, leaving out this panel's own.
-			function pageShifts() {
-				return perf.shifts.filter(function (shift) {
-					return !shift.sources.length || shift.sources.some(function (s) { return s.el && !inPanel(s.el); });
-				});
-			}
+			var inPanel = log.inPanel || function () { return false; };
 			function cls() {
-				return pageShifts().reduce(function (sum, s) { return sum + (s.input ? 0 : s.value); }, 0);
+				return log.cls ? log.cls() : 0;
 			}
 			function perfLines() {
-				var nav = performance.getEntriesByType('navigation')[0];
-				var resources = performance.getEntriesByType('resource');
-				var lines = ['', 'PAGE', 'viewport ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio + 'x | FCP ' + perf.fcp + ' ms | LCP ' + (perf.lcp ? perf.lcp.t + ' ms ' + describe(perf.lcp.el) + ' ' + short(perf.lcp.url) : '-') + ' | DOMContentLoaded ' + (nav ? Math.round(nav.domContentLoadedEventStart) : '-') + ' ms | load ' + (nav ? Math.round(nav.loadEventStart) : '-') + ' ms'];
-
-				lines.push('', 'LAYOUT SHIFTS (CLS ' + cls().toFixed(3) + '; time, score, element moved: y and height before -> after; then what changed size or finished loading just before)');
-				pageShifts().forEach(function (shift) {
-					lines.push(shift.t + ' ms\t' + shift.value.toFixed(3) + (shift.input ? ' (after input, not counted)' : '') + '\t' + shift.sources.filter(function (s) { return !inPanel(s.el); }).map(function (s) {
-						return describe(s.el) + ' y ' + Math.round(s.from.y) + '->' + Math.round(s.to.y) + ' h ' + Math.round(s.from.height) + '->' + Math.round(s.to.height);
-					}).join(' | '));
-					perf.resizes.filter(function (r) {
-						return r.t >= shift.t - 500 && r.t <= shift.t + 250 && !inPanel(r.el);
-					}).sort(function (a, b) {
-						return Math.abs(b.to - b.from) - Math.abs(a.to - a.from) || depth(b.el) - depth(a.el);
-					}).slice(0, 10).forEach(function (r) {
-						lines.push('    size at ' + r.t + ' ms: ' + describe(r.el) + ' h ' + r.from + '->' + r.to);
-					});
-					resources.filter(function (r) {
-						return r.responseEnd <= shift.t && r.responseEnd >= shift.t - 600;
-					}).slice(-6).forEach(function (r) {
-						lines.push('    loaded at ' + Math.round(r.responseEnd) + ' ms: ' + r.initiatorType + ' ' + short(r.name));
-					});
-				});
-
-				var blocking = perf.frames.reduce(function (sum, f) { return sum + (f.blocking || 0); }, 0);
-				lines.push('', 'LONG FRAMES over 50 ms (' + perf.frames.length + ', blocking ' + blocking + ' ms; start, length, blocking, scripts, render, style+layout, longest scripts)');
-				perf.frames.slice(0, 60).forEach(function (f) {
-					lines.push(f.t + ' ms\t' + f.ms + ' ms\tblocking ' + f.blocking + '\tscripts ' + f.script + '\trender ' + f.render + '\tstyle+layout ' + f.layout + '\t' + f.top.map(function (s) {
-						return Math.round(s.duration) + ' ms ' + (s.invoker || s.invokerType || '') + ' @ ' + short(s.sourceURL) + (s.sourceFunctionName ? ' ' + s.sourceFunctionName : '') + (s.forcedStyleAndLayoutDuration ? ' (forced layout ' + Math.round(s.forcedStyleAndLayoutDuration) + ' ms)' : '');
-					}).join(' | '));
-				});
-
-				return lines;
+				return log.perfLines ? log.perfLines() : [];
 			}
 
 			// Product count, paging markup and "no products" texts on archive pages,
@@ -980,4 +1006,107 @@ add_action(
 		<?php
 	},
 	9999
+);
+
+// Visitor recording (?zioma_cls=1): after the page settles, and again when it
+// is closed, send the PAGE / LAYOUT SHIFTS / LONG FRAMES text to the site.
+add_action(
+	'wp_footer',
+	function () {
+		if ( ! zioma_cls_recording() ) {
+			return;
+		}
+		?>
+		<script data-no-optimize="1" data-no-defer="1" data-cfasync="false">
+		(function () {
+			var log = window.ziomaDebug;
+			if (!log || !log.perfLines) {
+				return;
+			}
+			var url = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
+			var nonce = <?php echo wp_json_encode( wp_create_nonce( 'zioma_cls' ) ); ?>;
+			var id = Math.random().toString(36).slice(2, 12);
+			function send(when) {
+				try {
+					var text = ['URL: ' + location.href, 'Browser: ' + navigator.userAgent, 'Sent: ' + when].concat(log.perfLines()).join('\n');
+					var data = new FormData();
+					data.append('action', 'zioma_cls_report');
+					data.append('nonce', nonce);
+					data.append('id', id);
+					data.append('report', text.slice(0, 60000));
+					if (!(navigator.sendBeacon && navigator.sendBeacon(url, data))) {
+						fetch(url, { method: 'POST', body: data, keepalive: true, credentials: 'same-origin' });
+					}
+				} catch (e) {}
+			}
+			addEventListener('load', function () {
+				setTimeout(function () { send('4 s after load'); }, 4000);
+				setTimeout(function () { send('10 s after load'); }, 10000);
+			});
+			addEventListener('pagehide', function () { send('on leaving the page'); });
+		})();
+		</script>
+		<?php
+	},
+	9999
+);
+
+/**
+ * Stores a visitor recording; the newest six are kept.
+ */
+function zioma_cls_store() {
+	check_ajax_referer( 'zioma_cls', 'nonce' );
+
+	$id     = isset( $_POST['id'] ) ? substr( preg_replace( '/[^a-z0-9]/', '', strtolower( (string) wp_unslash( $_POST['id'] ) ) ), 0, 16 ) : '';
+	$report = isset( $_POST['report'] ) ? wp_strip_all_tags( wp_check_invalid_utf8( substr( (string) wp_unslash( $_POST['report'] ), 0, 60000 ) ) ) : '';
+	if ( '' === $id || '' === $report ) {
+		wp_die( '', '', array( 'response' => 400 ) );
+	}
+
+	$reports        = get_option( 'zioma_cls_reports', array() );
+	$reports        = is_array( $reports ) ? $reports : array();
+	$reports[ $id ] = array(
+		'time'   => time(),
+		'report' => $report,
+	);
+	uasort(
+		$reports,
+		function ( $a, $b ) {
+			return $b['time'] <=> $a['time'];
+		}
+	);
+	update_option( 'zioma_cls_reports', array_slice( $reports, 0, 6, true ), false );
+
+	wp_die( '', '', array( 'response' => 204 ) );
+}
+add_action( 'wp_ajax_zioma_cls_report', 'zioma_cls_store' );
+add_action( 'wp_ajax_nopriv_zioma_cls_report', 'zioma_cls_store' );
+
+// Admins read the recordings as plain text; &clear=1 deletes them.
+add_action(
+	'wp_ajax_zioma_cls_view',
+	function () {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( '', '', array( 'response' => 403 ) );
+		}
+		nocache_headers();
+		header( 'Content-Type: text/plain; charset=utf-8' );
+		header( 'X-Content-Type-Options: nosniff' );
+
+		if ( isset( $_GET['clear'] ) ) {
+			delete_option( 'zioma_cls_reports' );
+			echo "Recordings deleted.\n";
+			exit;
+		}
+
+		$reports = get_option( 'zioma_cls_reports', array() );
+		if ( ! $reports || ! is_array( $reports ) ) {
+			echo "No recordings yet. Open a page with ?zioma_cls=1 (for example in PageSpeed Insights) first.\n";
+			exit;
+		}
+		foreach ( $reports as $entry ) {
+			echo '===== received ' . esc_html( gmdate( 'Y-m-d H:i:s', (int) $entry['time'] ) ) . " UTC =====\n" . $entry['report'] . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- text/plain, tags stripped on save.
+		}
+		exit;
+	}
 );
