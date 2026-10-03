@@ -80,9 +80,9 @@ return array(
 
 	// Removes the server-level script's query short-circuit on product archives
 	// so the real total is counted and load-more / pagination work on categories
-	// with more than one page (see archive-count-fix.php). 'trial' until verified
-	// on a real multi-page category with ?zioma_trial=1, then set to 'on'.
-	'archive_loadmore_fix'  => 'trial',
+	// with more than one page (see archive-count-fix.php). Confirmed on a
+	// multi-page tag page with ?zioma_trial=1 (pagination appeared), now 'on'.
+	'archive_loadmore_fix'  => 'on',
 
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the
