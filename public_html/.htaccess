@@ -7,6 +7,14 @@ RewriteEngine On
 RewriteCond %{HTTP:X-Requested-With} ^XMLHttpRequest$ [NC]
 RewriteRule .* - [E=Cache-Control:no-cache]
 </IfModule>
+# کش مرورگر: فایل‌های ثابت (CSS، JS، فونت، تصویر، ویدیو) یک سال در مرورگر بازدیدکننده می‌مانند.
+# فقط فایل‌های واقعی با این پسوندها؛ صفحه‌های HTML، Ajax و PHP شامل نمی‌شوند.
+# وردپرس و LiteSpeed بعد از هر تغییر فایل، ?ver= یا نام فایل را عوض می‌کنند، پس نسخهٔ جدید گرفته می‌شود.
+<IfModule mod_headers.c>
+<FilesMatch "\.(css|js|mjs|woff2?|ttf|otf|eot|svg|ico|png|jpe?g|gif|webp|avif|mp4|webm)$">
+Header set Cache-Control "public, max-age=31536000"
+</FilesMatch>
+</IfModule>
 # END Zioma
 
 # BEGIN WordPress
