@@ -146,22 +146,21 @@ return array(
 		// hidden and the button keeps working.
 		'product' => '#comments-wrap:not([data-expanded="1"]) > .comment:nth-child(n+5){display:none}' . "\n" .
 			'#questions-wrap:not([data-expanded="1"]) > .question:nth-child(n+5){display:none}',
+
+		// Home mobile CLS (~0.18 → 0, confirmed on ?zioma_trial=1): the top image
+		// slider and the banner-ads block have no reserved height, so they jump
+		// from 0/small to full size when their images load. Reserve the container
+		// heights observed in the mobile inspector so the space is held from first
+		// paint. Container-level only — the individual swiper pre-render
+		// placeholder slides still collapse — so nothing visible changes.
+		'front_page' => '.prk-mobile-image-slider{min-height:245px}' . "\n" .
+			'.prk-banner-ads--banner_4 .prk-banner-ads__item{min-height:128px}',
 	),
 
 	// Rules still being verified: printed only on ?zioma_trial=1, whatever the
 	// 'critical_css' switch is, so they can be checked on the live site without
 	// affecting ordinary visitors, then moved into 'critical_css_rules' above.
-	'critical_css_trial_rules' => array(
-		// Home mobile CLS (~0.18): the top image slider and the banner-ads block
-		// have no reserved height, so they jump from 0/small to full when their
-		// images load. Reserve the container heights seen in the mobile inspector
-		// so the space is held from first paint. Container-level only (never the
-		// individual swiper slides, which must still collapse the pre-render
-		// placeholders), so it does not change what is shown — only stops the
-		// shift. Verify on /?zioma_trial=1 on a phone, then move to the live map.
-		'front_page' => '.prk-mobile-image-slider{min-height:245px}' . "\n" .
-			'.prk-banner-ads--banner_4 .prk-banner-ads__item{min-height:128px}',
-	),
+	'critical_css_trial_rules' => array(),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
 	// 'context'. The two text fonts every page uses, so they download next to
