@@ -64,6 +64,14 @@ return array(
 	// Removing the files below: 'off', 'trial' (only with ?zioma_trial=1) or 'on'.
 	'asset_trims'           => 'on',
 
+	// Carousels (Swiper) on these pages start auto-sliding on the visitor's
+	// first touch, scroll or mouse move, or after 'slider_hold_timeout' seconds,
+	// instead of while the page is still loading (see slider-hold.php). Cuts
+	// Speed Index; slides and styles are unchanged. 'off', 'trial' or 'on'.
+	'slider_hold'           => 'trial',
+	'slider_hold_contexts'  => array( 'front_page' ),
+	'slider_hold_timeout'   => 10,
+
 	// Inline critical CSS (see critical-css.php) that pins layout-shifting
 	// elements to the state the theme's own scripts settle them into, so the
 	// page looks identical from the first paint with no cumulative layout
