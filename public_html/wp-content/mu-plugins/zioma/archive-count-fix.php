@@ -56,3 +56,43 @@ add_filter(
 	20,
 	2
 );
+
+/**
+ * Let the real product count (and therefore load-more / pagination for
+ * categories with more than one page) work despite the server-level script.
+ *
+ * `wp-rand-prepend.php` runs as a CloudLinux auto_prepend file (outside the
+ * account, so it cannot be edited here) and short-circuits product queries via
+ * posts_pre_query (`mfm_search_pre`) plus a pre_get_posts tweak
+ * (`mfm_optimize_query`), which leaves found_posts = 0 and makes the archive
+ * think there is only one page. For product archive requests only, this removes
+ * those two hooks so WooCommerce/Archive V4 queries run normally and count their
+ * real totals. Removing by exact name/priority is a safe no-op if the script
+ * ever changes. Staged behind 'archive_loadmore_fix' (off / trial / on) because
+ * it changes how those queries run and must be verified on a real multi-page
+ * category first (?zioma_trial=1).
+ */
+add_action(
+	'pre_get_posts',
+	function ( $query ) {
+		if ( ! zioma_mode_active( 'archive_loadmore_fix' ) ) {
+			return;
+		}
+		if ( is_admin() || ! ( $query instanceof WP_Query ) || ! function_exists( 'is_shop' ) ) {
+			return;
+		}
+
+		$is_product_query = ( 'product' === $query->get( 'post_type' ) );
+		$is_archive_main  = ( $query->is_main_query() && ( is_shop() || is_product_taxonomy() || is_post_type_archive( 'product' ) ) );
+
+		if ( ! $is_product_query && ! $is_archive_main ) {
+			return;
+		}
+
+		// Drop the server script's query short-circuit for this request so the
+		// real count is computed. No-op if the hook is absent or renamed.
+		remove_action( 'pre_get_posts', 'mfm_optimize_query', 10 );
+		remove_filter( 'posts_pre_query', 'mfm_search_pre', 10 );
+	},
+	1
+);

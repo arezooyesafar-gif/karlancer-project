@@ -78,6 +78,12 @@ return array(
 	// 'off', 'trial' (only with ?zioma_trial=1) or 'on'. See archive-count-fix.php.
 	'archive_count_fix'     => 'on',
 
+	// Removes the server-level script's query short-circuit on product archives
+	// so the real total is counted and load-more / pagination work on categories
+	// with more than one page (see archive-count-fix.php). 'trial' until verified
+	// on a real multi-page category with ?zioma_trial=1, then set to 'on'.
+	'archive_loadmore_fix'  => 'trial',
+
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the
 	// theme and Elementor, and Lighthouse found 99% of this file unused there.
