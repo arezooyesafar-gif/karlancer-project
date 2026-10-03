@@ -16,5 +16,6 @@ require_once __DIR__ . '/zioma/options-memo.php';
 require_once __DIR__ . '/zioma/plugin-filter.php';
 require_once __DIR__ . '/zioma/lazyload.php';
 require_once __DIR__ . '/zioma/critical-css.php';
+require_once __DIR__ . '/zioma/archive-count-fix.php';
 require_once __DIR__ . '/zioma/delay-scripts.php';
 require_once __DIR__ . '/zioma/asset-inspector.php';

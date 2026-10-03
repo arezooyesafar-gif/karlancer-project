@@ -72,6 +72,12 @@ return array(
 	// filter/sort/search modals still open and nothing moved.
 	'critical_css'          => 'on',
 
+	// Corrects the archive result count when a host query-cache mu-plugin
+	// (wp-rand-prepend.php) returns products without setting found_posts, which
+	// otherwise makes the theme print "محصولی یافت نشد" next to real products.
+	// 'off', 'trial' (only with ?zioma_trial=1) or 'on'. See archive-count-fix.php.
+	'archive_count_fix'     => 'on',
+
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the
 	// theme and Elementor, and Lighthouse found 99% of this file unused there.
