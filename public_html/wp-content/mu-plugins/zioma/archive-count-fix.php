@@ -10,7 +10,11 @@
  * because max_num_pages is 0). The defect is in the host query cache, not the
  * theme or our code.
  *
- * On shop / product-taxonomy pages only, when a product query reports
+ * This runs on front-end page loads and on the theme's front-end AJAX requests
+ * (the category filter and load-more), but never on a real wp-admin screen.
+ *
+ * On shop / product-taxonomy pages (and the filter/load-more product query),
+ * when a product query reports
  * found_posts <= 0 but actually returned posts AND the page is not full
  * (post_count < posts_per_page, so there is no further page), set found_posts to
  * the true total we can be certain of. This never lowers a correct count and
@@ -31,13 +35,20 @@ add_filter(
 		if ( (int) $found > 0 || ! ( $query instanceof WP_Query ) ) {
 			return $found;
 		}
-		if ( is_admin() || ! function_exists( 'is_shop' ) ) {
+		if ( ! function_exists( 'is_shop' ) ) {
 			return $found;
 		}
-		if ( ! ( is_shop() || is_product_taxonomy() || is_post_type_archive( 'product' ) ) ) {
+		// Front-end page loads and front-end AJAX (the filter / load-more request)
+		// only; never a real wp-admin screen. An AJAX request reports is_admin()
+		// true but wp_doing_ajax() true as well, so it is allowed through here.
+		if ( is_admin() && ! wp_doing_ajax() ) {
 			return $found;
 		}
-		if ( 'product' !== $query->get( 'post_type' ) ) {
+		// The main archive query, or any product WP_Query. The filter / load-more
+		// AJAX builds its own product query that carries no is_shop()/taxonomy
+		// context, so match on the product post type too, not only the archive.
+		if ( 'product' !== $query->get( 'post_type' )
+			&& ! ( is_shop() || is_product_taxonomy() || is_post_type_archive( 'product' ) ) ) {
 			return $found;
 		}
 
@@ -78,7 +89,16 @@ add_action(
 		if ( ! zioma_mode_active( 'archive_loadmore_fix' ) ) {
 			return;
 		}
-		if ( is_admin() || ! ( $query instanceof WP_Query ) || ! function_exists( 'is_shop' ) ) {
+		if ( ! ( $query instanceof WP_Query ) || ! function_exists( 'is_shop' ) ) {
+			return;
+		}
+		// Front-end page loads and front-end AJAX (the filter / load-more request)
+		// only; never a real wp-admin screen. The category filter fires an AJAX
+		// request whose product query is otherwise still short-circuited by the
+		// server script, so it returned page-1 products regardless of the filter —
+		// the "filter only applies to the first page" bug. An AJAX request reports
+		// is_admin() true but wp_doing_ajax() true as well, so it is let through.
+		if ( is_admin() && ! wp_doing_ajax() ) {
 			return;
 		}
 
