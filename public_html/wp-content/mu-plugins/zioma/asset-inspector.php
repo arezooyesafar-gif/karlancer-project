@@ -1025,10 +1025,13 @@ add_action(
 			var url = <?php echo wp_json_encode( add_query_arg( 'zioma_cls_report', '1', home_url( '/' ) ) ); ?>;
 			var nonce = <?php echo wp_json_encode( wp_create_nonce( 'zioma_cls' ) ); ?>;
 			var id = Math.random().toString(36).slice(2, 12);
+			function build(when) {
+				var lines = broken ? ['', 'The recorder in <head> did not start (script error or removed by an optimizer).'] : log.perfLines();
+				return ['URL: ' + location.href, 'Browser: ' + navigator.userAgent, 'Sent: ' + when].concat(lines).join('\n');
+			}
 			function send(when) {
 				try {
-					var lines = broken ? ['', 'The recorder in <head> did not start (script error or removed by an optimizer).'] : log.perfLines();
-					var text = ['URL: ' + location.href, 'Browser: ' + navigator.userAgent, 'Sent: ' + when].concat(lines).join('\n');
+					var text = build(when);
 					var data = new FormData();
 					data.append('nonce', nonce);
 					data.append('id', id);
@@ -1047,6 +1050,42 @@ add_action(
 				});
 			});
 			addEventListener('pagehide', function () { send('on leaving the page'); });
+
+			// Also a button to copy the same report by hand, for a logged-out check in
+			// the user's own browser (device mode) when sending is blocked. Fixed in
+			// place inside #zioma-assets, so it moves nothing and is left out of the report.
+			addEventListener('load', function () {
+				setTimeout(function () {
+					var box = document.createElement('div');
+					box.id = 'zioma-assets';
+					box.setAttribute('dir', 'ltr');
+					box.style.cssText = 'position:fixed;left:8px;bottom:90px;z-index:2147483647;font:13px/1.4 monospace';
+					var button = document.createElement('button');
+					button.type = 'button';
+					button.textContent = 'Copy CLS report';
+					button.style.cssText = 'padding:10px 14px;background:#111;color:#fff;border:0;border-radius:6px;font:inherit;cursor:pointer';
+					var area = document.createElement('textarea');
+					area.readOnly = true;
+					area.style.cssText = 'display:none;width:90vw;height:40vh;margin-top:6px;font:12px monospace';
+					button.addEventListener('click', function () {
+						var text = build('copied by hand ' + Math.round(performance.now()) + ' ms after start');
+						function showBox() {
+							area.style.display = 'block';
+							area.value = text;
+							area.select();
+							button.textContent = 'Copy the text in the box';
+						}
+						if (navigator.clipboard && window.isSecureContext) {
+							navigator.clipboard.writeText(text).then(function () { button.textContent = 'Copied'; }, showBox);
+						} else {
+							showBox();
+						}
+					});
+					box.appendChild(button);
+					box.appendChild(area);
+					document.body.appendChild(box);
+				}, 3000);
+			});
 			document.addEventListener('visibilitychange', function () {
 				if ('hidden' === document.visibilityState) {
 					send('when the page was hidden');

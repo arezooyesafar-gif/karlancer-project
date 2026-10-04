@@ -22,6 +22,14 @@
 
 defined( 'ABSPATH' ) || exit;
 
+/**
+ * Whether a query is for products only ('product' or array( 'product' )).
+ */
+function zioma_is_product_query( $query ) {
+	$type = $query->get( 'post_type' );
+	return 'product' === $type || array( 'product' ) === $type;
+}
+
 add_filter(
 	'found_posts',
 	function ( $found, $query ) {
@@ -31,13 +39,16 @@ add_filter(
 		if ( (int) $found > 0 || ! ( $query instanceof WP_Query ) ) {
 			return $found;
 		}
-		if ( is_admin() || ! function_exists( 'is_shop' ) ) {
+		// Archive V4 filters and loads more products over Ajax (admin-ajax counts as
+		// is_admin()), so product queries in Ajax requests are covered too.
+		$ajax = wp_doing_ajax();
+		if ( ( is_admin() && ! $ajax ) || ! function_exists( 'is_shop' ) ) {
 			return $found;
 		}
-		if ( ! ( is_shop() || is_product_taxonomy() || is_post_type_archive( 'product' ) ) ) {
+		if ( ! $ajax && ! ( is_shop() || is_product_taxonomy() || is_post_type_archive( 'product' ) ) ) {
 			return $found;
 		}
-		if ( 'product' !== $query->get( 'post_type' ) ) {
+		if ( ! zioma_is_product_query( $query ) ) {
 			return $found;
 		}
 
@@ -67,8 +78,9 @@ add_filter(
  * (`mfm_optimize_query`), which leaves found_posts = 0 and makes the archive
  * think there is only one page. For product archive requests only, this removes
  * those two hooks so WooCommerce/Archive V4 queries run normally and count their
- * real totals. Removing by exact name/priority is a safe no-op if the script
- * ever changes. Staged behind 'archive_loadmore_fix' (off / trial / on) because
+ * real totals; the same goes for product queries in Ajax requests (the theme's
+ * filters and "load more"). Removing by exact name/priority is a safe no-op if
+ * the script ever changes. Staged behind 'archive_loadmore_fix' (off / trial / on) because
  * it changes how those queries run and must be verified on a real multi-page
  * category first (?zioma_trial=1).
  */
@@ -78,11 +90,15 @@ add_action(
 		if ( ! zioma_mode_active( 'archive_loadmore_fix' ) ) {
 			return;
 		}
-		if ( is_admin() || ! ( $query instanceof WP_Query ) || ! function_exists( 'is_shop' ) ) {
+		// Ajax requests too: the theme's category filters and "load more" query
+		// products over admin-ajax, where is_admin() is true. Without this the
+		// server script answered them from its cache, so filters only matched the
+		// first page of products.
+		if ( ( is_admin() && ! wp_doing_ajax() ) || ! ( $query instanceof WP_Query ) || ! function_exists( 'is_shop' ) ) {
 			return;
 		}
 
-		$is_product_query = ( 'product' === $query->get( 'post_type' ) );
+		$is_product_query = zioma_is_product_query( $query );
 		$is_archive_main  = ( $query->is_main_query() && ( is_shop() || is_product_taxonomy() || is_post_type_archive( 'product' ) ) );
 
 		if ( ! $is_product_query && ! $is_archive_main ) {

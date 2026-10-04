@@ -68,7 +68,8 @@ return array(
 	// first touch, scroll or mouse move, or after 'slider_hold_timeout' seconds,
 	// instead of while the page is still loading (see slider-hold.php). Cuts
 	// Speed Index; slides and styles are unchanged. 'off', 'trial' or 'on'.
-	'slider_hold'           => 'trial',
+	// Now 'on': PageSpeed mobile Speed Index went from 8.0 s to 5.2 s with it.
+	'slider_hold'           => 'on',
 	'slider_hold_contexts'  => array( 'front_page' ),
 	'slider_hold_timeout'   => 10,
 
@@ -91,6 +92,11 @@ return array(
 	// with more than one page (see archive-count-fix.php). Confirmed on a
 	// multi-page tag page with ?zioma_trial=1 (pagination appeared), now 'on'.
 	'archive_loadmore_fix'  => 'on',
+
+	// Product categories: click the theme's own "load more" button when it comes
+	// near the screen, so products load on scroll and the theme's filters and
+	// sorting keep working (see archive-infinite.php). 'off', 'trial' or 'on'.
+	'archive_infinite'      => 'trial',
 
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the
