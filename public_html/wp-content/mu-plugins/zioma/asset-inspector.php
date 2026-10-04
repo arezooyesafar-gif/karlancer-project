@@ -1020,17 +1020,16 @@ add_action(
 		<script data-no-optimize="1" data-no-defer="1" data-cfasync="false">
 		(function () {
 			var log = window.ziomaDebug;
-			if (!log || !log.perfLines) {
-				return;
-			}
-			var url = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
+			var broken = !log || !log.perfLines;
+			// Posted to the home page, not /wp-admin/, which hosts often close to foreign IPs (PageSpeed runs abroad).
+			var url = <?php echo wp_json_encode( add_query_arg( 'zioma_cls_report', '1', home_url( '/' ) ) ); ?>;
 			var nonce = <?php echo wp_json_encode( wp_create_nonce( 'zioma_cls' ) ); ?>;
 			var id = Math.random().toString(36).slice(2, 12);
 			function send(when) {
 				try {
-					var text = ['URL: ' + location.href, 'Browser: ' + navigator.userAgent, 'Sent: ' + when].concat(log.perfLines()).join('\n');
+					var lines = broken ? ['', 'The recorder in <head> did not start (script error or removed by an optimizer).'] : log.perfLines();
+					var text = ['URL: ' + location.href, 'Browser: ' + navigator.userAgent, 'Sent: ' + when].concat(lines).join('\n');
 					var data = new FormData();
-					data.append('action', 'zioma_cls_report');
 					data.append('nonce', nonce);
 					data.append('id', id);
 					data.append('report', text.slice(0, 60000));
@@ -1041,6 +1040,7 @@ add_action(
 			}
 			// PageSpeed may close the page a second or two after load, so send early
 			// and often; each send replaces the previous one for this page view.
+			document.addEventListener('DOMContentLoaded', function () { send('at DOMContentLoaded'); });
 			addEventListener('load', function () {
 				[0, 700, 1500, 2500, 4000, 7000].forEach(function (ms) {
 					setTimeout(function () { send(ms + ' ms after load'); }, ms);
@@ -1073,13 +1073,13 @@ function zioma_cls_store() {
 			),
 			false
 		);
-		wp_die( '', '', array( 'response' => 403 ) );
+		zioma_cls_finish( 403 );
 	}
 
 	$id     = isset( $_POST['id'] ) ? substr( preg_replace( '/[^a-z0-9]/', '', strtolower( (string) wp_unslash( $_POST['id'] ) ) ), 0, 16 ) : '';
 	$report = isset( $_POST['report'] ) ? wp_strip_all_tags( wp_check_invalid_utf8( substr( (string) wp_unslash( $_POST['report'] ), 0, 60000 ) ) ) : '';
 	if ( '' === $id || '' === $report ) {
-		wp_die( '', '', array( 'response' => 400 ) );
+		zioma_cls_finish( 400 );
 	}
 
 	$reports        = get_option( 'zioma_cls_reports', array() );
@@ -1096,10 +1096,28 @@ function zioma_cls_store() {
 	);
 	update_option( 'zioma_cls_reports', array_slice( $reports, 0, 6, true ), false );
 
-	wp_die( '', '', array( 'response' => 204 ) );
+	zioma_cls_finish( 204 );
 }
-add_action( 'wp_ajax_zioma_cls_report', 'zioma_cls_store' );
-add_action( 'wp_ajax_nopriv_zioma_cls_report', 'zioma_cls_store' );
+
+/**
+ * Ends a recording request with a bare status code.
+ */
+function zioma_cls_finish( $code ) {
+	status_header( $code );
+	nocache_headers();
+	exit;
+}
+
+// Recordings are POSTed to the home page (?zioma_cls_report=1).
+add_action(
+	'init',
+	function () {
+		if ( isset( $_GET['zioma_cls_report'] ) && isset( $_SERVER['REQUEST_METHOD'] ) && 'POST' === $_SERVER['REQUEST_METHOD'] ) {
+			zioma_cls_store();
+		}
+	},
+	1
+);
 
 // Admins read the recordings as plain text; &clear=1 deletes them.
 add_action(
