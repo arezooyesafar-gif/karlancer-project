@@ -777,52 +777,53 @@ add_action(
 					});
 				});
 
-				var biggest = null;
-				pageShifts().forEach(function (shift) {
-					if (!shift.input && (!biggest || shift.value > biggest.value)) {
-						biggest = shift;
-					}
-				});
-				if (biggest) {
+				// What sits above the element that moved most in each of the three
+				// largest shifts (shifts after input too: a stray tap must not hide one).
+				var first = log.firstHeights || new WeakMap();
+				var own = function (el) {
+					var classes = 'string' === typeof el.className ? el.className.trim().split(/\s+/).slice(0, 4).join('.') : '';
+					return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (classes ? '.' + classes : '');
+				};
+				var row = function (el, indent) {
+					var now = Math.round(el.getBoundingClientRect().height), was = first.has(el) ? first.get(el) : now;
+					var data = Array.prototype.filter.call(el.attributes, function (a) {
+						return /^data-(layout|prk-render|prk-slider-settings|active-layout|widget_type|mode)/.test(a.name);
+					}).map(function (a) { return a.name + '=' + a.value.slice(0, 160); }).join(' ');
+					return indent + (Math.abs(now - was) >= 8 ? '* ' : '  ') + own(el) + ' h ' + was + '->' + now + ' top ' + Math.round(el.getBoundingClientRect().top + scrollY) + (data ? ' | ' + data : '');
+				};
+				pageShifts().filter(function (shift) {
+					return shift.value >= 0.005;
+				}).sort(function (x, y) {
+					return y.value - x.value;
+				}).slice(0, 3).forEach(function (shift) {
 					var moved = null, distance = -1;
-					biggest.sources.forEach(function (s) {
+					shift.sources.forEach(function (s) {
 						var d = Math.abs(s.to.y - s.from.y);
 						if (s.el && 1 === s.el.nodeType && s.el.isConnected && !inPanel(s.el) && d > distance) {
 							moved = s.el;
 							distance = d;
 						}
 					});
-					if (moved) {
-						lines.push('', 'STRUCTURE above ' + describe(moved) + ' (moved ' + Math.round(distance) + ' px at ' + biggest.t + ' ms; each ancestor, then the elements before it: first seen height -> now, top now, * = changed)');
-						var first = log.firstHeights || new WeakMap();
-						var own = function (el) {
-							var classes = 'string' === typeof el.className ? el.className.trim().split(/\s+/).slice(0, 4).join('.') : '';
-							return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (classes ? '.' + classes : '');
-						};
-						var row = function (el, indent) {
-							var now = Math.round(el.getBoundingClientRect().height), was = first.has(el) ? first.get(el) : now;
-							var data = Array.prototype.filter.call(el.attributes, function (a) {
-								return /^data-(layout|prk-render|prk-slider-settings|active-layout|widget_type|mode)/.test(a.name);
-							}).map(function (a) { return a.name + '=' + a.value.slice(0, 160); }).join(' ');
-							return indent + (Math.abs(now - was) >= 8 ? '* ' : '  ') + own(el) + ' h ' + was + '->' + now + ' top ' + Math.round(el.getBoundingClientRect().top + scrollY) + (data ? ' | ' + data : '');
-						};
-						var chain = [];
-						for (var el = moved; el && el !== document.body; el = el.parentElement) {
-							chain.unshift(el);
-						}
-						chain.slice(0, 10).forEach(function (el, level) {
-							var before = [];
-							for (var sib = el.previousElementSibling; sib && before.length < 8; sib = sib.previousElementSibling) {
-								if (!/^(SCRIPT|STYLE|LINK|TEMPLATE|NOSCRIPT)$/.test(sib.tagName) && !inPanel(sib)) {
-									before.unshift(sib);
-								}
-							}
-							var pad = new Array(level + 1).join('  ');
-							before.forEach(function (sib) { lines.push(row(sib, pad + '  before: ')); });
-							lines.push(row(el, pad));
-						});
+					if (!moved) {
+						return;
 					}
-				}
+					lines.push('', 'STRUCTURE above ' + describe(moved) + ' (moved ' + Math.round(distance) + ' px at ' + shift.t + ' ms, score ' + shift.value.toFixed(3) + '; each ancestor, then the elements before it: first seen height -> now, top now, * = changed)');
+					var chain = [];
+					for (var el = moved; el && el !== document.body; el = el.parentElement) {
+						chain.unshift(el);
+					}
+					chain.slice(0, 12).forEach(function (el, level) {
+						var before = [];
+						for (var sib = el.previousElementSibling; sib && before.length < 8; sib = sib.previousElementSibling) {
+							if (!/^(SCRIPT|STYLE|LINK|TEMPLATE|NOSCRIPT)$/.test(sib.tagName) && !inPanel(sib)) {
+								before.unshift(sib);
+							}
+						}
+						var pad = new Array(level + 1).join('  ');
+						before.forEach(function (sib) { lines.push(row(sib, pad + '  before: ')); });
+						lines.push(row(el, pad));
+					});
+				});
 
 				var blocking = perf.frames.reduce(function (sum, f) { return sum + (f.blocking || 0); }, 0);
 				lines.push('', 'LONG FRAMES over 50 ms (' + perf.frames.length + ', blocking ' + blocking + ' ms; start, length, blocking, scripts, render, style+layout, longest scripts)');
