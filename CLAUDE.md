@@ -64,7 +64,9 @@ All work is on branch `claude/adoring-faraday-d5pk2q` (no PR; the default branch
 2. **Bug 2: category result count / "load more".** `archive-v4.js` read (see "What we know"): the "محصولی یافت نشد" count is server-rendered, so the defect is in the `ArchiveV4` PHP result-count renderer — ask the user for that PHP (the template/class that prints `.prk-av4-result-count`, keep out of git). Load-more JS is wired correctly, so the original "load more does nothing" still needs a category with a genuine second page to reproduce.
 3. **Bug 1 (page loops after the footer with LiteSpeed cache):** the fix is live (`.htaccess` + `cache-compat.php`). Ask the user to confirm in an incognito window.
 4. **LiteSpeed Crawler:** confirm the user switched it on (`admin.php?page=litespeed-crawler`, see `reports/05-speed-final-steps.md`). If the server has it disabled, consider a small cache warmer in the mu-plugin.
-5. **Final report:** fill the blanks in `reports/06-final-report-draft.md` (mobile and desktop scores for home / category / product, bug status) and deliver it in Persian.
+5. **Client's own plugin "کدهای سفارشی زیوما" (`zioma custom` in the active plugin list):** never reviewed yet. The client asked that its performance-related snippets be checked, only the unnecessary performance ones removed, and everything else kept. Need the plugin folder from the user (out of git if it holds anything sensitive); check for overlap/conflict with our mu-plugin dequeues.
+6. **Open checks from the client's delivery checklist (4 Oct 2026):** home mobile CLS 0.183 (waiting on a Pixel 7 / 412 px `?zioma_cls=5` copy report; an iPhone SE 375 px report showed CLS 0); home desktop CLS (0.144 on 2 Oct, not re-checked); `archive_infinite` confirmation then `on`; user-side final tests: loop bug in incognito with cache hit, Google Analytics Realtime, forms (login/register, add to cart, checkout, search, newsletter), 404, console during filter/load-more.
+7. **Final report:** fill the blanks in `reports/06-final-report-draft.md` (mobile and desktop scores for home / category / product, bug status) and deliver it in Persian.
 
 ## Delivering files
 
