@@ -502,7 +502,7 @@ function zioma_assets_server_lines() {
 add_action(
 	'init',
 	function () {
-		if ( zioma_assets_inspecting() ) {
+		if ( zioma_assets_inspecting() || zioma_cls_recording() ) {
 			do_action( 'litespeed_control_set_nocache', 'zioma: asset inspector' );
 			nocache_headers();
 		}
@@ -1039,11 +1039,19 @@ add_action(
 					}
 				} catch (e) {}
 			}
+			// PageSpeed may close the page a second or two after load, so send early
+			// and often; each send replaces the previous one for this page view.
 			addEventListener('load', function () {
-				setTimeout(function () { send('4 s after load'); }, 4000);
-				setTimeout(function () { send('10 s after load'); }, 10000);
+				[0, 700, 1500, 2500, 4000, 7000].forEach(function (ms) {
+					setTimeout(function () { send(ms + ' ms after load'); }, ms);
+				});
 			});
 			addEventListener('pagehide', function () { send('on leaving the page'); });
+			document.addEventListener('visibilitychange', function () {
+				if ('hidden' === document.visibilityState) {
+					send('when the page was hidden');
+				}
+			});
 		})();
 		</script>
 		<?php
@@ -1055,7 +1063,18 @@ add_action(
  * Stores a visitor recording; the newest six are kept.
  */
 function zioma_cls_store() {
-	check_ajax_referer( 'zioma_cls', 'nonce' );
+	if ( ! check_ajax_referer( 'zioma_cls', 'nonce', false ) ) {
+		// Noted so the view can tell "rejected" apart from "never arrived".
+		update_option(
+			'zioma_cls_rejected',
+			array(
+				'time' => time(),
+				'ua'   => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 200 ) : '',
+			),
+			false
+		);
+		wp_die( '', '', array( 'response' => 403 ) );
+	}
 
 	$id     = isset( $_POST['id'] ) ? substr( preg_replace( '/[^a-z0-9]/', '', strtolower( (string) wp_unslash( $_POST['id'] ) ) ), 0, 16 ) : '';
 	$report = isset( $_POST['report'] ) ? wp_strip_all_tags( wp_check_invalid_utf8( substr( (string) wp_unslash( $_POST['report'] ), 0, 60000 ) ) ) : '';
@@ -1095,8 +1114,14 @@ add_action(
 
 		if ( isset( $_GET['clear'] ) ) {
 			delete_option( 'zioma_cls_reports' );
+			delete_option( 'zioma_cls_rejected' );
 			echo "Recordings deleted.\n";
 			exit;
+		}
+
+		$rejected = get_option( 'zioma_cls_rejected' );
+		if ( is_array( $rejected ) && ! empty( $rejected['time'] ) ) {
+			echo 'Last rejected recording (bad or expired nonce): ' . esc_html( gmdate( 'Y-m-d H:i:s', (int) $rejected['time'] ) ) . ' UTC, ' . esc_html( $rejected['ua'] ) . "\n\n";
 		}
 
 		$reports = get_option( 'zioma_cls_reports', array() );
