@@ -780,6 +780,10 @@ add_action(
 				var nav = performance.getEntriesByType('navigation')[0];
 				var resources = performance.getEntriesByType('resource');
 				var lines = ['', 'PAGE', 'viewport ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio + 'x | FCP ' + perf.fcp + ' ms | LCP ' + (perf.lcp ? perf.lcp.t + ' ms ' + describe(perf.lcp.el) + ' ' + short(perf.lcp.url) : '-') + ' | DOMContentLoaded ' + (nav ? Math.round(nav.domContentLoadedEventStart) : '-') + ' ms | load ' + (nav ? Math.round(nav.loadEventStart) : '-') + ' ms'];
+				// Which of our layout fixes this page actually received, so a report
+				// shows whether the latest files are live.
+				var critical = document.getElementById('zioma-critical'), criticalCss = critical ? critical.textContent : '';
+				lines.push('zioma fixes on this page: head css ' + (critical ? 'yes' : 'NO') + ', modal hold ' + (/zioma-modal-wait/.test(criticalCss) ? 'yes' : 'no') + ', banner layout ' + (/prk-banner-ads/.test(criticalCss) ? 'yes' : 'no') + ', slider pins ' + document.querySelectorAll('style[id^="zioma-slider-pin"]').length);
 
 				lines.push('', 'LAYOUT SHIFTS (CLS ' + cls().toFixed(3) + '; time, score, element moved: y and height before -> after; then what changed size or finished loading just before)');
 				pageShifts().forEach(function (shift) {
