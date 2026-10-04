@@ -93,10 +93,11 @@ return array(
 	// multi-page tag page with ?zioma_trial=1 (pagination appeared), now 'on'.
 	'archive_loadmore_fix'  => 'on',
 
-	// Product categories: click the theme's own "load more" button when it comes
-	// near the screen, so products load on scroll and the theme's filters and
-	// sorting keep working (see archive-infinite.php). 'off', 'trial' or 'on'.
-	'archive_infinite'      => 'trial',
+	// Product categories load more products on scroll with the theme's own
+	// Archive V4 scroll mode (its setting 'archive_v4_load_more_mode' is read
+	// as 'scroll' instead of 'button'; see archive-infinite.php), so the theme's
+	// own button, Ajax, filters and sorting do the work. 'off', 'trial' or 'on'.
+	'archive_infinite'      => 'on',
 
 	// 'context' => array( 'style-handle', ... )
 	// Gutenberg block styles: product and category pages are built with the

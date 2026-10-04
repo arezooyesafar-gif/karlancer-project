@@ -689,6 +689,7 @@ add_action(
 			// shrank just before a layout shift. Elements are watched as they are added.
 			if (window.ResizeObserver && window.MutationObserver && window.WeakMap) {
 				var heights = new WeakMap();
+				var firstHeights = log.firstHeights = new WeakMap();
 				var resize = new ResizeObserver(function (entries) {
 					var t = Math.round(performance.now());
 					entries.forEach(function (entry) {
@@ -696,6 +697,9 @@ add_action(
 						var height = Math.round(box ? box.blockSize : entry.contentRect.height);
 						var old = heights.get(entry.target);
 						heights.set(entry.target, height);
+						if (!firstHeights.has(entry.target)) {
+							firstHeights.set(entry.target, height);
+						}
 						if (undefined !== old && Math.abs(height - old) >= 16 && perf.resizes.length < 1000) {
 							perf.resizes.push({ t: t, el: entry.target, from: old, to: height });
 						}
@@ -763,7 +767,7 @@ add_action(
 						});
 					}).sort(function (a, b) {
 						return Math.abs(b.to - b.from) - Math.abs(a.to - a.from) || depth(b.el) - depth(a.el);
-					}).slice(0, 12).forEach(function (r) {
+					}).slice(0, 25).forEach(function (r) {
 						lines.push('    size at ' + r.t + ' ms: ' + describe(r.el) + ' h ' + r.from + '->' + r.to);
 					});
 					resources.filter(function (r) {
@@ -772,6 +776,53 @@ add_action(
 						lines.push('    loaded at ' + Math.round(r.responseEnd) + ' ms: ' + r.initiatorType + ' ' + short(r.name));
 					});
 				});
+
+				var biggest = null;
+				pageShifts().forEach(function (shift) {
+					if (!shift.input && (!biggest || shift.value > biggest.value)) {
+						biggest = shift;
+					}
+				});
+				if (biggest) {
+					var moved = null, distance = -1;
+					biggest.sources.forEach(function (s) {
+						var d = Math.abs(s.to.y - s.from.y);
+						if (s.el && 1 === s.el.nodeType && s.el.isConnected && !inPanel(s.el) && d > distance) {
+							moved = s.el;
+							distance = d;
+						}
+					});
+					if (moved) {
+						lines.push('', 'STRUCTURE above ' + describe(moved) + ' (moved ' + Math.round(distance) + ' px at ' + biggest.t + ' ms; each ancestor, then the elements before it: first seen height -> now, top now, * = changed)');
+						var first = log.firstHeights || new WeakMap();
+						var own = function (el) {
+							var classes = 'string' === typeof el.className ? el.className.trim().split(/\s+/).slice(0, 4).join('.') : '';
+							return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (classes ? '.' + classes : '');
+						};
+						var row = function (el, indent) {
+							var now = Math.round(el.getBoundingClientRect().height), was = first.has(el) ? first.get(el) : now;
+							var data = Array.prototype.filter.call(el.attributes, function (a) {
+								return /^data-(layout|prk-render|prk-slider-settings|active-layout|widget_type|mode)/.test(a.name);
+							}).map(function (a) { return a.name + '=' + a.value.slice(0, 160); }).join(' ');
+							return indent + (Math.abs(now - was) >= 8 ? '* ' : '  ') + own(el) + ' h ' + was + '->' + now + ' top ' + Math.round(el.getBoundingClientRect().top + scrollY) + (data ? ' | ' + data : '');
+						};
+						var chain = [];
+						for (var el = moved; el && el !== document.body; el = el.parentElement) {
+							chain.unshift(el);
+						}
+						chain.slice(0, 10).forEach(function (el, level) {
+							var before = [];
+							for (var sib = el.previousElementSibling; sib && before.length < 8; sib = sib.previousElementSibling) {
+								if (!/^(SCRIPT|STYLE|LINK|TEMPLATE|NOSCRIPT)$/.test(sib.tagName) && !inPanel(sib)) {
+									before.unshift(sib);
+								}
+							}
+							var pad = new Array(level + 1).join('  ');
+							before.forEach(function (sib) { lines.push(row(sib, pad + '  before: ')); });
+							lines.push(row(el, pad));
+						});
+					}
+				}
 
 				var blocking = perf.frames.reduce(function (sum, f) { return sum + (f.blocking || 0); }, 0);
 				lines.push('', 'LONG FRAMES over 50 ms (' + perf.frames.length + ', blocking ' + blocking + ' ms; start, length, blocking, scripts, render, style+layout, longest scripts)');
