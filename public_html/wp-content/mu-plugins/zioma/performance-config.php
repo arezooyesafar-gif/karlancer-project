@@ -195,7 +195,36 @@ return array(
 		// (html.zioma-modal-wait, removed on the first touch, click or key press,
 		// before any theme handler runs, or at load; see critical-css.php), so
 		// opening and closing modals is left entirely to the theme.
-		'all' => 'html.zioma-modal-wait body .prk-modal.prk-modal:not(.show){display:none!important}',
+		'all' => 'html.zioma-modal-wait body .prk-modal.prk-modal:not(.show){display:none!important}' . "\n" .
+			// The theme's banner-ads widget gets its stylesheet late (printed with
+			// the footer assets, ~17 s on a slow mobile load); until then the old
+			// theme rules for .banners / .list4 collapse it to 10 px, and it then
+			// grows to its 2x2 grid (304 px at 412 px wide) and pushes the home
+			// page down (0.064, the ".elementor-element-ecbfedf" block right under
+			// the slider; ".elementor-element-fa4a1d8" lower down does the same).
+			// These are the widget's own layout rules from
+			// app/Elementor/Widgets/Globals/banner_ads_Widget/assets/style.css,
+			// unchanged, so the grid is in place from the first paint and the
+			// widget's stylesheet changes nothing when it arrives.
+			'.elementor-widget-banner-ads .prk-banner-ads{--prk-banner-gap:10px;--prk-banner-cols:2;display:grid;grid-template-columns:repeat(var(--prk-banner-cols),minmax(0,1fr));width:100%;max-width:100%;align-items:stretch;gap:var(--prk-banner-row-gap,var(--prk-banner-gap)) var(--prk-banner-column-gap,var(--prk-banner-gap));box-sizing:border-box}'
+			. '.elementor-widget-banner-ads .prk-banner-ads--banner_1{--prk-banner-cols:1}.elementor-widget-banner-ads .prk-banner-ads--banner_2{--prk-banner-cols:2}.elementor-widget-banner-ads .prk-banner-ads--banner_3{--prk-banner-cols:3}.elementor-widget-banner-ads .prk-banner-ads--banner_4{--prk-banner-cols:4}'
+			. '.elementor-widget-banner-ads .prk-banner-ads__item{position:relative;display:block;width:100%!important;min-width:0;max-width:100%;overflow:visible;transform-style:preserve-3d;isolation:isolate;margin:0!important;box-sizing:border-box}'
+			. '.elementor-widget-banner-ads .prk-banner-ads__link,.elementor-widget-banner-ads .prk-banner-ads__media{position:relative;display:block;width:100%;height:100%;overflow:hidden;color:inherit;text-decoration:none;box-sizing:border-box}'
+			. '.elementor-widget-banner-ads .prk-banner-ads__media{min-height:1px}'
+			. '.elementor-widget-banner-ads .prk-banner-ads__media img{display:block;width:100%;height:100%;object-fit:cover;vertical-align:middle}'
+			. '.elementor-widget-banner-ads .prk-banner-ads__item--placeholder .prk-banner-ads__media{min-height:90px;aspect-ratio:16/5}'
+			. '@media (min-width:1025px){.elementor-widget-banner-ads .prk-loop-render-desktop-off{display:none!important}}'
+			. '@media (min-width:768px) and (max-width:1024px){.elementor-widget-banner-ads .prk-loop-render-tablet-off{display:none!important}}'
+			. '@media (max-width:767px){.elementor-widget-banner-ads .prk-loop-render-mobile-off{display:none!important}.elementor-widget-banner-ads .prk-banner-ads--banner_4{--prk-banner-cols:2}}'
+			. '.elementor-widget-banner-ads .prk-banner-ads__item[style*="--prk-banner-image-ratio"] .prk-banner-ads__media{aspect-ratio:var(--prk-banner-image-ratio)}'
+			. '.elementor-widget-banner-ads .prk-banner-ads.is-prk-banner-loading .prk-banner-ads__item--placeholder .prk-banner-ads__media,.elementor-widget-banner-ads .prk-banner-ads[data-prk-banner-content-ajax]:not(.is-prk-banner-ajax-loaded) .prk-banner-ads__item--placeholder .prk-banner-ads__media{min-height:inherit}'
+			. 'body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item,body .elementor-widget-banner-ads .prk-banner-ads>.banners.list1.prk-banner-ads__item,body .elementor-widget-banner-ads .prk-banner-ads>.banners.list2.prk-banner-ads__item,body .elementor-widget-banner-ads .prk-banner-ads>.banners.list3.prk-banner-ads__item,body .elementor-widget-banner-ads .prk-banner-ads>.banners.list4.prk-banner-ads__item{float:none!important;flex:initial!important;display:block!important;width:100%!important;inline-size:100%!important;max-width:100%!important;min-width:0!important;margin:0!important;justify-self:stretch!important;align-self:stretch!important;box-sizing:border-box!important}'
+			. 'body .elementor-widget-banner-ads .prk-banner-ads>.banners.list4:nth-child(2),body .elementor-widget-banner-ads .prk-banner-ads>.banners.list4:last-child,body .elementor-widget-banner-ads .prk-banner-ads>.banners.list2:last-child{margin:0!important}'
+			. 'body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item .prk-banner-ads__link,body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item .prk-banner-ads__media,body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item .prk-banner-ads__image,body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item .prk-banner-ads__skeleton{width:100%!important;inline-size:100%!important;max-width:100%!important;box-sizing:border-box!important}'
+			. '@media (max-width:767px){body .elementor-widget-banner-ads .prk-banner-ads.prk-banner-ads--banner_1{--prk-banner-cols:1}body .elementor-widget-banner-ads .prk-banner-ads.prk-banner-ads--banner_2{--prk-banner-cols:2}body .elementor-widget-banner-ads .prk-banner-ads.prk-banner-ads--banner_3{--prk-banner-cols:3}body .elementor-widget-banner-ads .prk-banner-ads.prk-banner-ads--banner_4{--prk-banner-cols:2}}'
+			. '.elementor-widget-banner-ads .prk-banner-ads>.prk-banner-ads__item[style*="--prk-banner-image-ratio"],body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item[style*="--prk-banner-image-ratio"]{aspect-ratio:var(--prk-banner-image-ratio)!important;min-height:0!important;height:auto!important;overflow:visible}'
+			. '.elementor-widget-banner-ads .prk-banner-ads>.prk-banner-ads__item[style*="--prk-banner-image-ratio"]>.prk-banner-ads__link,.elementor-widget-banner-ads .prk-banner-ads>.prk-banner-ads__item[style*="--prk-banner-image-ratio"] .prk-banner-ads__media,body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item[style*="--prk-banner-image-ratio"]>.prk-banner-ads__link,body .elementor-widget-banner-ads .prk-banner-ads>.banners.prk-banner-ads__item[style*="--prk-banner-image-ratio"] .prk-banner-ads__media{height:100%!important;min-height:0!important;aspect-ratio:auto!important}'
+			. '.elementor-widget-banner-ads .prk-banner-ads>.prk-banner-ads__item[style*="--prk-banner-image-ratio"] .prk-banner-ads__skeleton,.elementor-widget-banner-ads .prk-banner-ads>.prk-banner-ads__item[style*="--prk-banner-image-ratio"] .prk-banner-ads__image{height:100%!important}',
 	),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
