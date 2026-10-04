@@ -58,7 +58,8 @@ add_action(
 			}
 			function check() {
 				ticking = false;
-				if (count() !== seen) { seen = count(); misses = 0; } // a filter or sort reloaded the grid
+				// A filter or sort reloaded the grid: start counting misses again.
+				if (count() !== seen) { seen = count(); misses = 0; }
 				if (busy || misses >= 2) { return; }
 				var btn = button();
 				if (!btn || btn.getBoundingClientRect().top > innerHeight + 600) { return; }

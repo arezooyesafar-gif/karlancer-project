@@ -66,6 +66,10 @@ All work is on branch `claude/adoring-faraday-d5pk2q` (no PR; the default branch
 4. **LiteSpeed Crawler:** confirm the user switched it on (`admin.php?page=litespeed-crawler`, see `reports/05-speed-final-steps.md`). If the server has it disabled, consider a small cache warmer in the mu-plugin.
 5. **Final report:** fill the blanks in `reports/06-final-report-draft.md` (mobile and desktop scores for home / category / product, bug status) and deliver it in Persian.
 
+## Delivering files
+
+The user wants every delivered code file without comments. Keep the commented source in the repo and build the upload copy with `php tools/strip-comments.php public_html/wp-content/mu-plugins <scratchpad>/upload/mu-plugins` (drops PHP comments via the tokenizer and whole-line / trailing `//` comments in inline `<script>` HTML), then `php -l` the output and zip that. Deliver `.htaccess` lines without comments too.
+
 ## Checks
 
 `php -l` every changed PHP file. There is no WordPress install or site access here: the user uploads changes to the host (see `reports/02-upload-and-test.md`) and pastes inspector reports back. Never upload `wp-config.php` from the repo.
