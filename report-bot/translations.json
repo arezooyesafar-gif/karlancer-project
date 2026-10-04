@@ -1374,9 +1374,14 @@
     "special": "ویژه"
   },
   "menu_report_scam": {
-    "fa": "ریپورت اسکم | جعلی",
-    "ar": "الإبلاغ عن احتيال | مزيف",
-    "en": "Report Scam | Fake"
+    "fa": "💰 ریپورت اسکم",
+    "ar": "💰 الإبلاغ عن احتيال",
+    "en": "💰 Report Scam"
+  },
+  "menu_report_fake": {
+    "fa": "🎭 ریپورت فیک",
+    "ar": "🎭 الإبلاغ عن حساب مزيف",
+    "en": "🎭 Report Fake"
   },
   "menu_report_profile": {
     "fa": "👤 ریپورت پروفایل",
@@ -3037,5 +3042,70 @@
     "fa": "❌ عدد نامعتبر (۱ تا ۳۶۵۰).",
     "ar": "❌ رقم غير صالح.",
     "en": "❌ Invalid number (1–3650)."
+  },
+  "report_scam_intro": {
+    "fa": "💰 ریپورت اسکم (کلاهبرداری)\nبرای: کلاهبرداری و فریب، فیشینگ و بدافزار، فروشنده یا سرویس متقلب، وعده‌های مالی دروغ.\nگزارش با گزینهٔ «Scam or fraud» خودِ تلگرام ارسال می‌شود.\nبرای جعل هویت / اکانت یا کانال جعلی از «🎭 ریپورت فیک» استفاده کن.",
+    "ar": "💰 الإبلاغ عن احتيال\nلـ: الاحتيال والخداع، التصيد والبرمجيات الخبيثة، بائع أو خدمة احتيالية، وعود مالية كاذبة.\nيُرسل البلاغ عبر خيار «Scam or fraud» الخاص بتيليجرام.\nلانتحال الهوية / حساب أو قناة مزيفة استخدم «🎭 الإبلاغ عن حساب مزيف».",
+    "en": "💰 Scam report\nFor: fraud and deception, phishing and malware, fraudulent sellers or services, fake financial promises.\nSent with Telegram's own \"Scam or fraud\" option.\nFor impersonation / fake accounts or channels use \"🎭 Report Fake\"."
+  },
+  "report_fake_intro": {
+    "fa": "🎭 ریپورت فیک (جعل هویت)\nبرای: اکانت یا کانالی که خودش را جای شخص، برند یا کانال دیگری جا زده.\nگزارش با گزینهٔ «Scam or fraud › Impersonation» تلگرام و دلیل Fake ارسال می‌شود.\nبرای کلاهبرداری مالی/فیشینگ از «💰 ریپورت اسکم» استفاده کن.",
+    "ar": "🎭 الإبلاغ عن حساب مزيف (انتحال)\nلـ: حساب أو قناة تنتحل شخصًا أو علامة تجارية أو قناة أخرى.\nيُرسل عبر خيار «Scam or fraud › Impersonation» وسبب Fake.\nللاحتيال المالي/التصيد استخدم «💰 الإبلاغ عن احتيال».",
+    "en": "🎭 Fake report (impersonation)\nFor: an account or channel pretending to be another person, brand or channel.\nSent with Telegram's \"Scam or fraud › Impersonation\" option and the Fake reason.\nFor financial fraud / phishing use \"💰 Report Scam\"."
+  },
+  "scam_pick_subtype": {
+    "fa": "نوع کلاهبرداری را انتخاب کن (گزینه‌های Scam خودِ تلگرام):",
+    "ar": "اختر نوع الاحتيال (خيارات تيليجرام):",
+    "en": "Choose the scam type (Telegram's own Scam options):"
+  },
+  "fake_pick_subtype": {
+    "fa": "گزینهٔ جعل هویت را انتخاب کن:",
+    "ar": "اختر خيار انتحال الهوية:",
+    "en": "Choose the impersonation option:"
+  },
+  "scam_option_unavailable": {
+    "fa": "❌ تلگرام برای این هدف گزینهٔ «Scam or fraud» را نشان نداد؛ ریپورت اسکم ارسال نشد.\nگزینه‌های موجود در لاگ ثبت شد.",
+    "ar": "❌ لم يعرض تيليجرام خيار «Scam or fraud» لهذا الهدف؛ لم يُرسل البلاغ.",
+    "en": "❌ Telegram did not offer \"Scam or fraud\" for this target, so no scam report was sent.\nThe options it did offer were logged."
+  },
+  "fake_option_unavailable": {
+    "fa": "❌ تلگرام برای این هدف گزینهٔ «Scam or fraud › Impersonation» (جعل هویت) را نشان نداد؛ ریپورت فیک ارسال نشد.\nگزینه‌های موجود در لاگ ثبت شد.",
+    "ar": "❌ لم يعرض تيليجرام خيار «Impersonation» لهذا الهدف؛ لم يُرسل البلاغ.",
+    "en": "❌ Telegram did not offer \"Scam or fraud › Impersonation\" for this target, so no fake report was sent.\nThe options it did offer were logged."
+  },
+  "reason_option_unavailable": {
+    "fa": "❌ تلگرام برای این هدف گزینهٔ «{reason}» را نشان نداد؛ ریپورت ارسال نشد.",
+    "ar": "❌ لم يعرض تيليجرام خيار «{reason}» لهذا الهدف.",
+    "en": "❌ Telegram did not offer \"{reason}\" for this target; nothing was sent."
+  },
+  "peer_reason_scam_note": {
+    "fa": "ℹ️ API تلگرام برای ریپورت پروفایل (account.reportPeer) دلیل جداگانهٔ Scam ندارد؛ گزینهٔ «Scam» با دلیل Other و توضیح کلاهبرداری ارسال می‌شود (نه Fake).",
+    "ar": "ℹ️ لا يملك API تيليجرام (account.reportPeer) سببًا مستقلًا للاحتيال؛ يُرسل خيار «Scam» بسبب Other مع وصف الاحتيال (وليس Fake).",
+    "en": "ℹ️ Telegram's profile report API (account.reportPeer) has no Scam reason; \"Scam\" is sent as Other with a scam description (never as Fake)."
+  },
+  "report_err_no_option": {
+    "fa": "❌ گزینهٔ انتخاب‌شده در منوی ریپورت تلگرام پیدا نشد (منو برای این اکانت/هدف فرق دارد). جزئیات در لاگ.",
+    "ar": "❌ لم يُعثر على الخيار في قائمة البلاغ لدى تيليجرام. التفاصيل في السجل.",
+    "en": "❌ The chosen option is not in Telegram's report menu for this account/target. Details are in the log."
+  },
+  "report_err_option_invalid": {
+    "fa": "❌ تلگرام: OPTION_INVALID — گزینهٔ ارسالی در منوی ریپورت این مرحله وجود ندارد.",
+    "ar": "❌ تيليجرام: OPTION_INVALID — الخيار غير موجود في هذه المرحلة.",
+    "en": "❌ Telegram: OPTION_INVALID — the option is not in the report menu at this step."
+  },
+  "report_err_message_id_invalid": {
+    "fa": "❌ تلگرام: MESSAGE_ID_INVALID — آیدی پیام وجود ندارد یا این اکانت آن را نمی‌بیند. لینک پست را چک کن.",
+    "ar": "❌ تيليجرام: MESSAGE_ID_INVALID — معرف الرسالة غير موجود أو غير مرئي.",
+    "en": "❌ Telegram: MESSAGE_ID_INVALID — the message id does not exist or this account cannot see it. Check the post link."
+  },
+  "report_err_peer_id_invalid": {
+    "fa": "❌ تلگرام: PEER_ID_INVALID — اکانت نمونه نتوانست هدف را باز کند (عضو نیست یا هدف حذف شده).",
+    "ar": "❌ تيليجرام: PEER_ID_INVALID — لم يتمكن الحساب من فتح الهدف.",
+    "en": "❌ Telegram: PEER_ID_INVALID — the probe account cannot open the target (not joined or deleted)."
+  },
+  "report_err_rpc": {
+    "fa": "❌ خطای تلگرام هنگام ریپورت: {error}",
+    "ar": "❌ خطأ تيليجرام أثناء البلاغ: {error}",
+    "en": "❌ Telegram error while reporting: {error}"
   }
 }

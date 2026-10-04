@@ -677,10 +677,10 @@ def _path_looks_personal(ctx_snapshot: dict) -> bool:
 
 def _should_auto_comment(ctx_snapshot: dict) -> bool:
 
-    return (ctx_snapshot or {}).get("mode") == "scam"
+    return (ctx_snapshot or {}).get("mode") in ("scam", "fake")
 
 def _path_needs_channel_ban(ctx_snapshot: dict) -> bool:
-    if (ctx_snapshot or {}).get("mode") == "scam":
+    if (ctx_snapshot or {}).get("mode") in ("scam", "fake"):
         return True
     return (
         _path_looks_adult(ctx_snapshot)
@@ -963,6 +963,418 @@ def _path_step_from_option(uid: int, option: bytes, options_list=None) -> dict:
         raw_text = (REPORT_OPT_TRANSLATIONS.get(key) or {}).get("en") or ""
     return {"text": text, "raw_text": raw_text, "option": option, "key": key}
 
+# ---------------------------------------------------------------------------
+# Report reasons: the single source of truth for every report flow.
+#
+# Telegram exposes two report APIs and they do not offer the same reasons:
+#
+# * messages.report / stories.report (layer 229): the server returns a menu
+#   (ReportResultChooseOption) and the client answers with the `option` bytes
+#   of the chosen entry. "Scam or fraud" is a top-level entry there, and
+#   "Impersonation" (fake account / fake channel) is one of its sub-entries,
+#   next to "Deceptive or unrealistic financial claims", "Malware, phishing"
+#   and "Fraudulent seller, product or service".
+# * account.reportPeer takes a fixed ReportReason constructor:
+#   Spam, Violence, Pornography, ChildAbuse, Copyright, GeoIrrelevant, Fake,
+#   IllegalDrugs, PersonalDetails, Other. There is NO Scam constructor.
+#
+# So Fake = "Scam or fraud > Impersonation" in the menu API and
+# InputReportReasonFake in reportPeer. Scam = "Scam or fraud > (anything but
+# Impersonation)" in the menu API; reportPeer cannot express it, so a peer
+# level scam report is sent as InputReportReasonOther with an explicit scam
+# description (REPORT_API_LIMIT_SCAM) and never as Fake.
+# ---------------------------------------------------------------------------
+
+REPORT_REASON_CODES = (
+    "spam",
+    "violence",
+    "porn",
+    "child",
+    "fake",
+    "scam",
+    "drugs",
+    "personal",
+    "copyright",
+    "other",
+)
+
+REPORT_API_LIMIT_SCAM = "API_LIMIT:no_InputReportReasonScam->InputReportReasonOther"
+
+
+class _ReasonSpec:
+    __slots__ = ("code", "label", "peer_reason", "levels", "forbidden_keys", "forbidden_aliases")
+
+    def __init__(self, code, label, peer_reason, levels, forbidden_keys=(), forbidden_aliases=()):
+        self.code = code
+        self.label = label
+        # account.reportPeer constructor, or None when the API has none.
+        self.peer_reason = peer_reason
+        # messages.report menu path: one list per level, each entry is
+        # (observed option key, text aliases in en/fa/ar), in preference order.
+        self.levels = levels
+        # options that belong to a different reason and must never be chosen.
+        self.forbidden_keys = frozenset(forbidden_keys)
+        self.forbidden_aliases = tuple(forbidden_aliases)
+
+
+_SCAM_ROOT = [("7", ("scam or fraud", "scam", "fraud", "کلاهبرداری یا فریب", "کلاهبرداری", "احتيال أو خداع", "احتيال"))]
+_IMPERSONATION_ALIASES = ("impersonation", "impersonat", "جعل هویت", "انتحال الهوية", "انتحال")
+_SCAM_ONLY_ALIASES = (
+    "fraudulent",
+    "deceptive",
+    "unrealistic financial",
+    "financial claim",
+    "phishing",
+    "متقلب",
+    "فریبنده",
+    "فیشینگ",
+    "احتيالية",
+    "مضللة",
+    "تصيد",
+)
+
+REPORT_REASON_SPECS = {
+    "spam": _ReasonSpec(
+        "spam",
+        "Spam",
+        types.InputReportReasonSpam,
+        [
+            [("9", ("spam", "اسپم", "رسائل مزعجة"))],
+            [
+                ("92", ("promoting other content", "ترویج محتوای دیگر", "الترويج لمحتوى آخر")),
+                ("91", ("promoting illegal content", "ترویج محتوای غیرقانونی", "الترويج لمحتوى غير قانوني")),
+                ("93", ("insults or false information", "توهین یا اطلاعات نادرست", "إهانات أو معلومات مضللة")),
+            ],
+        ],
+    ),
+    "violence": _ReasonSpec(
+        "violence",
+        "Violence",
+        types.InputReportReasonViolence,
+        [
+            [("3", ("violence", "خشونت", "عنف"))],
+            [
+                ("32", ("graphic or disturbing", "محتوای تصویری یا آزاردهنده", "محتوى صادم أو مزعج")),
+                ("35", ("calling for violence", "فراخوان خشونت", "دعوة للعنف")),
+                ("33", ("extreme violence", "خشونت شدید", "عنف شديد")),
+                ("37", ("terrorism", "تروریسم", "إرهاب")),
+                ("34", ("hate speech", "نفرت‌پراکنی", "خطاب أو رموز الكراهية")),
+                ("36", ("organized crime", "جرم سازمان‌یافته", "جريمة منظمة")),
+                ("38", ("animal abuse", "آزار حیوانات", "إساءة معاملة الحيوانات")),
+                ("31", ("insults or false information", "توهین یا اطلاعات نادرست", "إهانات أو معلومات مضللة")),
+            ],
+        ],
+    ),
+    "porn": _ReasonSpec(
+        "porn",
+        "Pornography",
+        types.InputReportReasonPornography,
+        [
+            [("5", ("illegal adult content", "illegal adult", "adult content", "محتوای بزرگسال", "للبالغين"))],
+            [("57", ("pornography", "پورنوگرافی", "مواد إباحية", "إباحية"))],
+        ],
+        forbidden_keys=("56",),
+        forbidden_aliases=("child", "کودک", "أطفال"),
+    ),
+    "child": _ReasonSpec(
+        "child",
+        "Child Abuse",
+        types.InputReportReasonChildAbuse,
+        [
+            [("2", ("child abuse", "سوءاستفاده از کودکان", "إساءة معاملة الأطفال"))],
+            [
+                ("21", ("child sexual abuse", "سوءاستفاده جنسی از کودک", "استغلال جنسي للأطفال")),
+                ("22", ("child physical abuse", "سوءاستفاده جسمی از کودک", "إساءة جسدية للأطفال")),
+            ],
+        ],
+    ),
+    "fake": _ReasonSpec(
+        "fake",
+        "Fake",
+        types.InputReportReasonFake,
+        [
+            _SCAM_ROOT,
+            [("71", _IMPERSONATION_ALIASES)],
+        ],
+        forbidden_keys=("72", "73", "74"),
+        forbidden_aliases=_SCAM_ONLY_ALIASES,
+    ),
+    "scam": _ReasonSpec(
+        "scam",
+        "Scam",
+        None,
+        [
+            _SCAM_ROOT,
+            [
+                ("74", ("fraudulent seller", "fraudulent", "فروشنده، محصول یا خدمات متقلب", "متقلب", "بائع أو منتج أو خدمة احتيالية")),
+                ("72", ("deceptive or unrealistic financial", "unrealistic financial", "deceptive", "وعده‌های مالی فریبنده", "ادعاءات مالية مضللة")),
+                ("73", ("malware, phishing", "phishing", "بدافزار، فیشینگ", "فیشینگ", "برمجيات خبيثة، تصيد", "تصيد")),
+            ],
+        ],
+        forbidden_keys=("71",),
+        forbidden_aliases=_IMPERSONATION_ALIASES,
+    ),
+    "drugs": _ReasonSpec(
+        "drugs",
+        "Illegal Drugs",
+        types.InputReportReasonIllegalDrugs,
+        [
+            [("4", ("illegal goods and services", "illegal goods", "کالاها و خدمات غیرقانونی", "سلع وخدمات غير قانونية"))],
+            [("42", ("drugs", "مواد مخدر", "مخدرات"))],
+            [
+                ("422", ("illegal drugs", "مواد مخدر غیرقانونی", "مخدرات غير قانونية")),
+                ("423", ("other substances", "سایر مواد", "مخدرات أخرى")),
+                ("421", ("nicotine", "نیکوتین", "النيكوتين")),
+            ],
+        ],
+    ),
+    "personal": _ReasonSpec(
+        "personal",
+        "Personal Details",
+        types.InputReportReasonPersonalDetails,
+        [
+            [("6", ("personal data", "personal details", "اطلاعات شخصی", "بيانات شخصية"))],
+            [
+                ("65", ("other personal information", "سایر اطلاعات شخصی", "معلومات شخصية أخرى")),
+                ("62", ("phone number", "شماره تلفن", "رقم هاتف")),
+                ("61", ("private images", "تصاویر خصوصی", "صور خاصة")),
+                ("63", ("address", "آدرس")),
+                ("64", ("stolen data", "credentials", "رمزهای سرقت‌شده", "بيانات اعتماد مسروقة")),
+            ],
+        ],
+    ),
+    "copyright": _ReasonSpec(
+        "copyright",
+        "Copyright",
+        types.InputReportReasonCopyright,
+        [[("8", ("copyright", "کپی‌رایت", "کپی رایت", "حق نشر", "حقوق النشر"))]],
+    ),
+    "other": _ReasonSpec(
+        "other",
+        "Other",
+        types.InputReportReasonOther,
+        [
+            [("a", ("other", "سایر موارد", "أخرى"))],
+            [("a2", ("something else", "چیز دیگری", "شيء آخر"))],
+        ],
+    ),
+    # Supported by account.reportPeer only, and only meaningful for
+    # location-based groups, so it is not offered in the menus.
+    "geo": _ReasonSpec(
+        "geo",
+        "Irrelevant location",
+        types.InputReportReasonGeoIrrelevant,
+        [],
+    ),
+}
+
+
+def _reason_spec(code: str | None) -> _ReasonSpec | None:
+    return REPORT_REASON_SPECS.get((code or "").strip().lower())
+
+
+def _option_key(o) -> str:
+    try:
+        return bytes(o.option).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+def _option_text_folded(o) -> str:
+    return _fold_opt_text(getattr(o, "text", None) or "")
+
+
+def _text_has_alias(text: str, aliases) -> bool:
+    text = _fold_opt_text(text)
+    if not text:
+        return False
+    return any(_fold_opt_text(a) and _fold_opt_text(a) in text for a in aliases)
+
+
+def _option_forbidden_for(code: str | None, o) -> bool:
+    spec = _reason_spec(code)
+    if spec is None:
+        return False
+    if _option_key(o) in spec.forbidden_keys:
+        return True
+    return _text_has_alias(getattr(o, "text", None) or "", spec.forbidden_aliases)
+
+
+def _pick_reason_option(options, code: str, level: int):
+    """Pick the Telegram menu entry for `code` at menu depth `level`.
+
+    Text is checked first (exact, then contains) because the bytes are opaque
+    server data; the observed option key is the fallback. Entries that belong
+    to another reason (e.g. Impersonation for Scam) are never returned.
+    """
+    spec = _reason_spec(code)
+    if spec is None or not options or level >= len(spec.levels):
+        return None
+    allowed = [o for o in options if not _option_forbidden_for(code, o)]
+    cands = spec.levels[level]
+    # Candidates are in preference order; for each one try an exact text
+    # match, then a contained alias.
+    for _key, aliases in cands:
+        folded = {_fold_opt_text(a) for a in aliases}
+        hit = next((o for o in allowed if _option_text_folded(o) in folded), None)
+        if hit is None:
+            hit = next((o for o in allowed if _text_has_alias(o.text or "", aliases)), None)
+        if hit is not None:
+            return hit
+    for key, _aliases in cands:
+        for o in allowed:
+            if _option_key(o) == key:
+                return o
+    return None
+
+
+def _reason_sub_options(options, code: str) -> list:
+    """Menu entries a user may pick for `code` (other reasons filtered out)."""
+    return [o for o in (options or []) if not _option_forbidden_for(code, o)]
+
+
+# Root menu entry -> category. Order matters only for the alias pass.
+_ROOT_CATEGORY_RULES = (
+    ("child", ("2",), ("child abuse", "سوءاستفاده از کودکان", "إساءة معاملة الأطفال")),
+    ("violence", ("3",), ("violence", "خشونت", "عنف")),
+    ("goods", ("4",), ("illegal goods", "کالاها و خدمات غیرقانونی", "سلع وخدمات غير قانونية")),
+    ("porn", ("5",), ("illegal adult", "adult content", "محتوای بزرگسال", "للبالغين")),
+    ("personal", ("6",), ("personal data", "personal details", "اطلاعات شخصی", "بيانات شخصية")),
+    ("scam", ("7",), ("scam", "fraud", "کلاهبرداری", "احتيال")),
+    ("copyright", ("8",), ("copyright", "کپی‌رایت", "کپی رایت", "حق نشر", "حقوق النشر")),
+    ("spam", ("9",), ("spam", "اسپم", "رسائل مزعجة")),
+    (
+        "other",
+        ("a", "1", "b"),
+        (
+            "other",
+            "something else",
+            "don't like",
+            "not illegal",
+            "سایر موارد",
+            "خوشم نمی",
+            "غیرقانونی نیست",
+            "أخرى",
+            "لا يعجبني",
+            "ليس غير قانوني",
+        ),
+    ),
+)
+_CHILD_ALIASES = ("child", "کودک", "أطفال")
+_DRUG_ALIASES = ("drug", "nicotine", "substance", "مواد مخدر", "مخدر", "نیکوتین", "سایر مواد", "مخدرات", "النيكوتين")
+_ADULT_ALIASES = ("illegal adult", "adult content", "محتوای بزرگسال", "للبالغين")
+
+
+def _step_key(step: dict) -> str:
+    opt = _norm_option(step.get("option"))
+    if opt:
+        return _opt_key_bytes(opt)
+    return (step.get("key") or "").strip()
+
+
+def _step_texts(step: dict) -> str:
+    return " | ".join(
+        t for t in (step.get("raw_text") or "", step.get("text") or "") if t
+    )
+
+
+def _step_matches(step: dict, aliases, keys=()) -> bool:
+    if keys and _step_key(step) in keys:
+        return True
+    return _text_has_alias(_step_texts(step), aliases)
+
+
+def _reason_code_from_path(path: list | None) -> str:
+    """Map a recorded menu path (or a pr:<code> peer option) to a reason code."""
+    steps = [s for s in (path or []) if isinstance(s, dict)]
+    if not steps:
+        return "other"
+    for step in reversed(steps):
+        opt = _norm_option(step.get("option")) or b""
+        if bytes(opt).startswith(b"pr:"):
+            code = bytes(opt)[3:].decode("utf-8", "ignore").strip().lower()
+            return code if code in REPORT_REASON_SPECS else "other"
+    root, subs = steps[0], steps[1:]
+    category = None
+    for cat, _keys, aliases in _ROOT_CATEGORY_RULES:
+        if _text_has_alias(_step_texts(root), aliases):
+            category = cat
+            break
+    if category is None:
+        rk = _step_key(root)
+        category = next((cat for cat, keys, _a in _ROOT_CATEGORY_RULES if rk in keys), None)
+    if category == "scam":
+        if any(_step_matches(s, _IMPERSONATION_ALIASES, ("71",)) for s in subs):
+            return "fake"
+        return "scam"
+    if category == "porn":
+        if any(_step_matches(s, _CHILD_ALIASES, ("56",)) for s in subs):
+            return "child"
+        return "porn"
+    if category == "goods":
+        if any(
+            _step_matches(s, _DRUG_ALIASES) or _step_key(s).startswith("42")
+            for s in subs
+        ):
+            return "drugs"
+        return "other"
+    if category == "other":
+        if any(_step_matches(s, _ADULT_ALIASES, ("a4",)) for s in subs):
+            return "porn"
+        return "other"
+    if category:
+        return category
+    # Unknown menu (different language or layout): look at every step.
+    for step in reversed(steps):
+        if _step_matches(step, _IMPERSONATION_ALIASES):
+            return "fake"
+        if _step_matches(step, _SCAM_ONLY_ALIASES + ("scam", "fraud")):
+            return "scam"
+        if _step_matches(step, _CHILD_ALIASES):
+            return "child"
+        if _step_matches(step, ("porn", "پورن", "إباحي")):
+            return "porn"
+        if _step_matches(step, ("illegal drug", "مواد مخدر", "مخدرات")):
+            return "drugs"
+        if _step_matches(step, ("personal", "اطلاعات شخصی", "بيانات شخصية")):
+            return "personal"
+        if _step_matches(step, ("copyright", "کپی‌رایت", "حق نشر", "حقوق النشر")):
+            return "copyright"
+        if _step_matches(step, ("violence", "terror", "خشونت", "عنف")):
+            return "violence"
+        if _step_matches(step, ("spam", "اسپم")):
+            return "spam"
+    return "other"
+
+
+def _peer_reason_for_code(code: str | None):
+    """account.reportPeer reason for `code` -> (ReportReason, api_note)."""
+    spec = _reason_spec(code)
+    if spec is None:
+        return types.InputReportReasonOther(), "UNKNOWN_REASON->Other"
+    if spec.peer_reason is None:
+        # Telegram has no InputReportReasonScam; Other + scam text is the
+        # only honest option. Never Fake.
+        return types.InputReportReasonOther(), REPORT_API_LIMIT_SCAM
+    return spec.peer_reason(), ""
+
+
+# Report modes whose reason is fixed by the menu button itself.
+_MODE_REASON = {"scam": "scam", "fake": "fake"}
+
+
+def _mode_reason_code(mode: str | None) -> str | None:
+    return _MODE_REASON.get((mode or "").strip().lower())
+
+
+def _reason_label(code: str | None) -> str:
+    spec = _reason_spec(code)
+    return spec.label if spec else str(code or "?")
+
+
+def _path_keys_for_log(path: list | None) -> list:
+    return [_step_key(s) for s in (path or []) if isinstance(s, dict)]
+
 TEXT_OVERRIDES = {}
 _ov_doc = db.settings.find_one({"key": "text_overrides"})
 if _ov_doc and isinstance(_ov_doc.get("value"), dict):
@@ -1055,6 +1467,7 @@ menu_keys = [
     ("buy_normal_subscription", "buy_normal"),
     ("buy_special_subscription", "buy_special"),
     ("menu_report_scam", "report_scam"),
+    ("menu_report_fake", "report_fake"),
     ("menu_report_profile", "report_profile"),
     ("menu_join_request", "join_request"),
     ("menu_send_pv", "send_pv"),
@@ -2340,7 +2753,16 @@ def _path_reason_summary(ctx_snapshot: dict) -> str:
             parts.append(t)
     return " > ".join(parts)
 
+def _ctx_reason_code(ctx_snapshot: dict) -> str:
+    ctx_snapshot = ctx_snapshot or {}
+    return _mode_reason_code(ctx_snapshot.get("mode")) or _reason_code_from_path(
+        ctx_snapshot.get("path") or []
+    )
+
 def _ai_kind_for_ctx(ctx_snapshot: dict) -> str:
+    code = _ctx_reason_code(ctx_snapshot)
+    if code in ("scam", "fake"):
+        return code
     if _path_looks_adult(ctx_snapshot):
         return "porn"
     if _path_looks_violence(ctx_snapshot):
@@ -2525,6 +2947,7 @@ PANEL_PERMISSION_ACTIONS = [
     "report_story",
     "report_bot",
     "report_scam",
+    "report_fake",
     "report_profile",
     "join_request",
     "partners",
@@ -2554,6 +2977,12 @@ def init_panel_permissions():
                 actions.insert(actions.index("report_scam") + 1, "report_profile")
             else:
                 actions.append("report_profile")
+            value[plan] = actions
+            changed = True
+        # Fake used to share the "Scam | Fake" button, so a plan that had
+        # report_scam keeps access to Fake after the split.
+        if "report_fake" not in actions and "report_scam" in actions:
+            actions.insert(actions.index("report_scam") + 1, "report_fake")
             value[plan] = actions
             changed = True
     if changed:
@@ -4311,6 +4740,39 @@ async def _pick_comment(ctx_snapshot: dict, need_comment: bool = True) -> str:
             if ai_text:
                 return ai_text[:4000]
 
+    code = _ctx_reason_code(ctx_snapshot)
+    if code == "scam":
+        return random.choice(
+            [
+                (
+                    "Scam / fraud report. This channel/account deceives users to take their "
+                    "money or data: fraudulent sales, fake investment or financial promises, "
+                    "or phishing links. Please remove the content and ban or restrict the "
+                    f"channel/account to protect other users.{where}"
+                ),
+                (
+                    "This peer runs a scam: it sells products or services that are never "
+                    "delivered, promises unrealistic financial returns, or collects payments "
+                    "and credentials through phishing. Clear Telegram ToS fraud violation. "
+                    f"Request removal and permanent enforcement.{where}"
+                ),
+            ]
+        )
+    if code == "fake":
+        return random.choice(
+            [
+                (
+                    "Fake account / impersonation report. This channel/account pretends to be "
+                    "another person, brand or official channel to mislead users. Please verify "
+                    f"and remove or restrict the impersonating account.{where}"
+                ),
+                (
+                    "Impersonation: this peer copies the name, photo and identity of a real "
+                    "person or organization and presents itself as them. This violates "
+                    f"Telegram Terms of Service. Request removal of the fake account.{where}"
+                ),
+            ]
+        )
     if _path_looks_adult(ctx_snapshot):
         return random.choice(
             [
@@ -4403,14 +4865,130 @@ async def _pick_comment(ctx_snapshot: dict, need_comment: bool = True) -> str:
         f"reviewed, removed, and the channel/account restricted without delay.{where}"
     )[:4000]
 
-def _rpc_err_info(e: Exception) -> str:
+def _build_tg_error_names() -> dict:
+    # Telethon raises e.g. OptionInvalidError whose .message is the generic
+    # "BAD_REQUEST"; map the class back to Telegram's own error string.
+    names: dict = {}
+    try:
+        from telethon.errors import rpcerrorlist as _rpcl
+    except Exception:
+        return names
+    for name, cls in (getattr(_rpcl, "rpc_errors_dict", None) or {}).items():
+        names.setdefault(cls, str(name))
+    for pattern, cls in getattr(_rpcl, "rpc_errors_re", None) or ():
+        clean = re.sub(r"_?\(\\d\+\)", "", str(pattern)).strip("_")
+        names.setdefault(cls, clean or str(pattern))
+    return names
 
+
+_TG_ERROR_NAMES = _build_tg_error_names()
+_GENERIC_RPC_MESSAGES = frozenset(
+    {"", "BAD_REQUEST", "UNAUTHORIZED", "FORBIDDEN", "NOT_FOUND", "FLOOD", "INTERNAL", "SEE_OTHER"}
+)
+
+
+def _tg_error_name(e: Exception) -> str:
+    """Telegram's error string (OPTION_INVALID, PEER_ID_INVALID, ...)."""
+    name = _TG_ERROR_NAMES.get(type(e))
+    if name:
+        return name
+    msg = (getattr(e, "message", None) or "").strip().upper()
+    if msg and msg not in _GENERIC_RPC_MESSAGES:
+        return msg
+    return e.__class__.__name__
+
+
+def _rpc_err_info(e: Exception) -> str:
     code = getattr(e, "code", None)
-    msg = (getattr(e, "message", None) or "").strip()
-    name = e.__class__.__name__
-    if msg:
-        return f"{name}:{msg}" if not code else f"{name}:{code}:{msg}"
+    name = _tg_error_name(e)
     return f"{name}:{code}" if code else name
+
+
+_REPORT_ERROR_HINTS = {
+    "OPTION_INVALID": "option bytes are not in the menu Telegram returned at this step (stale or wrong path)",
+    "PEER_ID_INVALID": "this account cannot use the peer (not joined, wrong access_hash, or deleted)",
+    "MESSAGE_ID_INVALID": "message id does not exist or is not visible to this account",
+    "MESSAGE_IDS_EMPTY": "no message id was sent",
+    "MESSAGE_ID_REQUIRED": "Telegram requires a message id for this peer; account.reportPeer is not accepted",
+    "CHANNEL_PRIVATE": "account is not a member of the channel or was banned from it",
+    "CHANNEL_INVALID": "channel does not exist or the access_hash is wrong",
+    "CHAT_ADMIN_REQUIRED": "this call needs admin rights in the chat",
+    "INPUT_USER_DEACTIVATED": "target user account was deleted",
+    "STORY_ID_INVALID": "story id does not exist or is not visible to this account",
+    "FROZEN_METHOD_INVALID": "the reporting account is frozen by Telegram",
+    "PEER_ID_NOT_SUPPORTED": "this peer type cannot be reported with this method",
+}
+
+
+def _peer_log(peer) -> str:
+    if peer is None:
+        return "None"
+    for attr in ("channel_id", "chat_id", "user_id", "id"):
+        val = getattr(peer, attr, None)
+        if isinstance(val, int):
+            return f"{type(peer).__name__}:{val}"
+    return type(peer).__name__
+
+
+def _report_rpc_fail(
+    method: str,
+    e: Exception,
+    *,
+    peer=None,
+    ids=None,
+    option=None,
+    reason=None,
+    step=None,
+    sess=None,
+    mode=None,
+) -> str:
+    """Log a failed report call with everything needed to locate the fault."""
+    if isinstance(e, errors.FloodWaitError):
+        logger.warning(
+            "report_rpc_error method=%s error=FLOOD_WAIT seconds=%s reason=%s peer=%s sess=%s",
+            method,
+            e.seconds,
+            reason,
+            _peer_log(peer),
+            sess,
+        )
+        return f"FLOODWAIT_{e.seconds}s"
+    name = _tg_error_name(e)
+    rc = getattr(e, "code", None)
+    opt = option
+    if isinstance(opt, (bytes, bytearray)):
+        opt = bytes(opt).decode("utf-8", "ignore")
+    logger.warning(
+        "report_rpc_error method=%s error=%s code=%s class=%s mode=%s reason=%s option=%r "
+        "step=%s peer=%s msg_ids=%s sess=%s hint=%s",
+        method,
+        name,
+        rc,
+        e.__class__.__name__,
+        mode,
+        reason,
+        opt,
+        step,
+        _peer_log(peer),
+        list(ids)[:8] if ids else ids,
+        sess,
+        _REPORT_ERROR_HINTS.get(name, "-"),
+    )
+    return f"RPC_ERROR:{name}:{rc}" if rc else f"RPC_ERROR:{name}"
+
+
+def _report_ok_log(method: str, *, mode=None, reason=None, path=None, peer=None, ids=None, sess=None, extra=None):
+    logger.info(
+        "report_sent method=%s mode=%s reason=%s path=%s peer=%s msg_ids=%s sess=%s%s",
+        method,
+        mode,
+        reason,
+        _path_keys_for_log(path),
+        _peer_log(peer),
+        list(ids)[:8] if ids else ids,
+        sess,
+        f" {extra}" if extra else "",
+    )
 
 async def _report_req(cli, peer, ids: list[int], option: bytes, message: str = ""):
 
@@ -4476,11 +5054,54 @@ async def _mark_channel_posts_seen(cli, peer, ids: list[int]) -> None:
         logger.debug("channel view increment failed: %s", e)
 
 
+def _path_is_peer_reason(path: list | None) -> bool:
+    """True when the path holds a pr:<code> option (account.reportPeer menu)."""
+    for step in path or []:
+        opt = _norm_option(step.get("option")) if isinstance(step, dict) else None
+        if opt and bytes(opt).startswith(b"pr:"):
+            return True
+    return False
+
+
+def _choose_path_option(options, path: list, step_idx: int, reason_code: str | None):
+    """Option to send at `step_idx`, or None. Never returns an option that
+    belongs to a different reason (e.g. Impersonation while reporting Scam)."""
+    if step_idx < len(path):
+        choice = _match_report_choice(options, path[step_idx])
+    else:
+        # Telegram added a level after the path was recorded: follow the
+        # registry for this reason instead of failing or guessing.
+        choice = _pick_reason_option(options, reason_code, step_idx) if reason_code else None
+    if choice is not None and reason_code and _option_forbidden_for(reason_code, choice):
+        logger.warning(
+            "report option rejected: %r (%s) belongs to another reason than %s",
+            _option_key(choice),
+            getattr(choice, "text", ""),
+            reason_code,
+        )
+        return None
+    return choice
+
+
 async def _walk_messages_report(
-    cli, peer, path: list, ctx_snapshot: dict, msg_ids: list[int] | None
+    cli,
+    peer,
+    path: list,
+    ctx_snapshot: dict,
+    msg_ids: list[int] | None,
+    *,
+    sess_id: str | None = None,
+    reason_code: str | None = None,
 ) -> tuple[bool, str]:
     if isinstance(peer, str) or not _is_valid_peer(peer):
         return False, _join_fail_reason(peer) or "JOIN_FAILED"
+
+    mode = (ctx_snapshot or {}).get("mode")
+    if reason_code is None:
+        reason_code = _reason_code_from_path(path) if path else None
+    if path and _path_is_peer_reason(path):
+        # pr:<code> options only exist for account.reportPeer.
+        return await _report_peer_legacy(cli, peer, path, ctx_snapshot, sess_id=sess_id)
 
     if msg_ids is None:
         ids: list[int] = []
@@ -4493,14 +5114,26 @@ async def _walk_messages_report(
         if mid:
             ids = [mid]
     if not ids:
-        return await _report_peer_legacy(cli, peer, path, ctx_snapshot)
+        return await _report_peer_legacy(cli, peer, path, ctx_snapshot, sess_id=sess_id)
     await _mark_channel_posts_seen(cli, peer, ids)
+
+    def _fail(e, option, step):
+        return _report_rpc_fail(
+            "messages.report",
+            e,
+            peer=peer,
+            ids=ids,
+            option=option,
+            reason=reason_code,
+            step=step,
+            sess=sess_id,
+            mode=mode,
+        )
+
     try:
         res = await _report_req(cli, peer, ids, b"", "")
-    except errors.FloodWaitError as e:
-        return False, f"FLOODWAIT_{e.seconds}s"
     except errors.RPCError as e:
-        return False, _rpc_err_info(e)
+        return False, _fail(e, b"", 0)
     except ValueError as e:
         err = str(e)
         logger.warning("ReportRequest ValueError: %s ids=%s peer=%r", e, ids, type(peer).__name__)
@@ -4515,29 +5148,32 @@ async def _walk_messages_report(
     step_idx = 0
     for _ in range(14):
         if isinstance(res, types.ReportResultChooseOption):
-            if step_idx >= len(path):
-                return False, "PATH_MISMATCH"
-            choice = _match_report_choice(res.options, path[step_idx])
+            choice = _choose_path_option(res.options, path, step_idx, reason_code)
             if not choice:
                 avail = [
                     (o.option.decode("utf-8", "ignore"), o.text)
                     for o in (res.options or [])
                 ]
-                logger.warning(
-                    "NO_OPTION step=%s want=%s avail=%s",
-                    step_idx,
-                    (path[step_idx].get("key"), path[step_idx].get("text")),
-                    avail,
+                want = (
+                    (path[step_idx].get("key"), path[step_idx].get("text"))
+                    if step_idx < len(path)
+                    else ("<beyond recorded path>", reason_code)
                 )
-                return False, "NO_OPTION"
+                logger.warning(
+                    "NO_OPTION mode=%s reason=%s step=%s want=%s avail=%s sess=%s",
+                    mode,
+                    reason_code,
+                    step_idx,
+                    want,
+                    avail,
+                    sess_id,
+                )
+                return False, "NO_OPTION" if step_idx < len(path) else "PATH_MISMATCH"
             await _report_step_pause()
             try:
                 res = await _report_req(cli, peer, ids, choice.option, "")
-            except errors.FloodWaitError as e:
-                return False, f"FLOODWAIT_{e.seconds}s"
             except errors.RPCError as e:
-
-                return False, _rpc_err_info(e)
+                return False, _fail(e, choice.option, step_idx + 1)
             except ValueError as e:
                 logger.warning("ReportRequest ValueError mid-path: %s", e)
                 return False, f"VALUE:{str(e)[:80]}"
@@ -4557,16 +5193,23 @@ async def _walk_messages_report(
             await _report_step_pause()
             try:
                 res = await _report_req(cli, peer, ids, res.option, comment)
-            except errors.FloodWaitError as e:
-                return False, f"FLOODWAIT_{e.seconds}s"
             except errors.RPCError as e:
-                return False, _rpc_err_info(e)
+                return False, _fail(e, res.option, f"{step_idx}+comment")
             except (ConnectionError, OSError, asyncio.TimeoutError) as e:
                 return False, f"CONN_{e.__class__.__name__}"
             except Exception as e:
                 return False, f"EXC_{e.__class__.__name__}"
             continue
         if isinstance(res, types.ReportResultReported):
+            _report_ok_log(
+                "messages.report",
+                mode=mode,
+                reason=reason_code,
+                path=path,
+                peer=peer,
+                ids=ids,
+                sess=sess_id,
+            )
             return True, "REPORTED"
         return False, f"UNEXPECTED:{type(res).__name__}"
     return False, "MAX_STEPS"
@@ -4669,70 +5312,141 @@ class _PeerReportOption:
         self.option = option
         self.text = text
 
-_PEER_REPORT_REASONS = (
-    (b"pr:spam", "Spam", types.InputReportReasonSpam),
-    (b"pr:violence", "Violence", types.InputReportReasonViolence),
-    (b"pr:porn", "Adult content", types.InputReportReasonPornography),
-    (b"pr:child", "Child abuse", types.InputReportReasonChildAbuse),
-    (b"pr:fake", "Fake account", types.InputReportReasonFake),
-    (b"pr:drugs", "Illegal drugs", types.InputReportReasonIllegalDrugs),
-    (b"pr:personal", "Personal data", types.InputReportReasonPersonalDetails),
-    (b"pr:other", "Other", types.InputReportReasonOther),
+# account.reportPeer menu (profile / bot without a message). One entry per
+# reason code; labels are translated via report_options_translations.json
+# ("pr:<code>" keys).
+_PEER_OPTION_LABELS = {
+    "spam": "Spam",
+    "violence": "Violence",
+    "porn": "Pornography",
+    "child": "Child abuse",
+    "fake": "Fake / impersonation",
+    "scam": "Scam / fraud",
+    "drugs": "Illegal drugs",
+    "personal": "Personal details",
+    "copyright": "Copyright",
+    "other": "Other",
+}
+
+_PEER_REPORT_REASONS = tuple(
+    (f"pr:{code}".encode(), _PEER_OPTION_LABELS[code], REPORT_REASON_SPECS[code].peer_reason)
+    for code in REPORT_REASON_CODES
 )
 
 def _peer_report_options() -> list:
     return [_PeerReportOption(opt, text) for opt, text, _ in _PEER_REPORT_REASONS]
 
+def _peer_code_from_option(opt) -> str:
+    raw = bytes(_norm_option(opt) or b"")
+    if raw.startswith(b"pr:"):
+        code = raw[3:].decode("utf-8", "ignore").strip().lower()
+        return code if code in REPORT_REASON_SPECS else "other"
+    key = raw.decode("utf-8", "ignore")
+    return _reason_code_from_path([{"option": raw, "key": key, "text": key, "raw_text": ""}])
+
 def _peer_reason_from_option(opt: bytes | None):
-    raw = bytes(opt or b"")
-    for key, _text, cls in _PEER_REPORT_REASONS:
-        if raw == key:
-            return cls()
-    text = raw.decode("utf-8", "ignore").lower()
-    mapping = (
-        (("spam", "اسپم", "هرز"), types.InputReportReasonSpam),
-        (("violence", "خشونت", "terror"), types.InputReportReasonViolence),
-        (("porn", "adult", "پورن", "جنسی"), types.InputReportReasonPornography),
-        (("child", "کودک"), types.InputReportReasonChildAbuse),
-        (("fake", "جعلی", "تقلب"), types.InputReportReasonFake),
-        (("drug", "مواد"), types.InputReportReasonIllegalDrugs),
-        (("personal", "خصوصی"), types.InputReportReasonPersonalDetails),
-    )
-    for keys, cls in mapping:
-        if any(k in text for k in keys):
-            return cls()
-    return types.InputReportReasonOther()
+    return _peer_reason_for_code(_peer_code_from_option(opt))[0]
 
 def _reason_from_path(path: list):
-    for step in reversed(path or []):
-        opt = _norm_option(step.get("option"))
-        if opt and bytes(opt).startswith(b"pr:"):
-            return _peer_reason_from_option(opt)
-        blob = f"{step.get('key') or ''} {step.get('text') or ''}".lower()
-        if blob.strip():
-            return _peer_reason_from_option(blob.encode("utf-8", "ignore"))
-    return types.InputReportReasonOther()
+    return _peer_reason_for_code(_reason_code_from_path(path))[0]
 
-async def _report_peer_legacy(
-    cli, peer, path: list, ctx_snapshot: dict, *, force_reason=None
+_SCAM_PEER_PREFIX = (
+    "Report type: Scam / fraud (fraudulent seller or service, phishing, or deceptive "
+    "financial claims). "
+)
+
+def _peer_report_message(code: str | None, comment: str, note: str = "") -> str:
+    comment = (comment or "").strip() or "Violation of Telegram Terms of Service."
+    if note == REPORT_API_LIMIT_SCAM and not comment.startswith(_SCAM_PEER_PREFIX):
+        comment = _SCAM_PEER_PREFIX + comment
+    return comment[:4000]
+
+async def _send_peer_report(
+    cli,
+    peer,
+    code: str,
+    comment: str,
+    *,
+    sess_id: str | None = None,
+    mode: str | None = None,
 ) -> tuple[bool, str]:
-    reason = force_reason if force_reason is not None else _reason_from_path(path)
-    comment = await _pick_comment(ctx_snapshot, need_comment=True)
-    if not (comment or "").strip():
-        comment = "Violation of Telegram Terms of Service."
+    """account.reportPeer with the reason registered for `code`."""
+    reason, note = _peer_reason_for_code(code)
+    message = _peer_report_message(code, comment, note)
+    if note:
+        logger.info(
+            "report_peer api_note code=%s note=%s peer=%s sess=%s",
+            code,
+            note,
+            _peer_log(peer),
+            sess_id,
+        )
     try:
         ok = await cli(
             functions.account.ReportPeerRequest(
-                peer=peer, reason=reason, message=comment
+                peer=peer, reason=reason, message=message
             )
         )
-        return (True, "REPORTED_PEER") if ok else (False, "PEER_REPORT_REJECTED")
-    except errors.FloodWaitError as e:
-        return False, f"FLOODWAIT_{e.seconds}s"
     except errors.RPCError as e:
-        return False, _rpc_err_info(e)
+        return False, _report_rpc_fail(
+            "account.reportPeer",
+            e,
+            peer=peer,
+            reason=f"{code}:{type(reason).__name__}",
+            sess=sess_id,
+            mode=mode,
+        )
+    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+        return False, f"CONN_{e.__class__.__name__}"
     except Exception as e:
+        logger.warning(
+            "report_peer exception code=%s peer=%s sess=%s: %r",
+            code,
+            _peer_log(peer),
+            sess_id,
+            e,
+        )
         return False, f"EXC_{e.__class__.__name__}"
+    if not ok:
+        logger.warning(
+            "report_peer rejected (returned false) code=%s reason=%s peer=%s sess=%s",
+            code,
+            type(reason).__name__,
+            _peer_log(peer),
+            sess_id,
+        )
+        return False, "PEER_REPORT_REJECTED"
+    _report_ok_log(
+        "account.reportPeer",
+        mode=mode,
+        reason=f"{code}:{type(reason).__name__}",
+        peer=peer,
+        sess=sess_id,
+        extra=f"note={note}" if note else None,
+    )
+    if note == REPORT_API_LIMIT_SCAM:
+        return True, "REPORTED_PEER:OTHER(SCAM_API_LIMIT)"
+    return True, "REPORTED_PEER"
+
+async def _report_peer_legacy(
+    cli,
+    peer,
+    path: list,
+    ctx_snapshot: dict,
+    *,
+    reason_code: str | None = None,
+    sess_id: str | None = None,
+) -> tuple[bool, str]:
+    code = reason_code or _reason_code_from_path(path)
+    comment = await _pick_comment(ctx_snapshot, need_comment=True)
+    return await _send_peer_report(
+        cli,
+        peer,
+        code,
+        comment,
+        sess_id=sess_id,
+        mode=(ctx_snapshot or {}).get("mode"),
+    )
 
 async def _walk_peer_report(
     cli,
@@ -4740,6 +5454,8 @@ async def _walk_peer_report(
     path: list,
     ctx_snapshot: dict,
     msg_ids: list[int] | None = None,
+    *,
+    sess_id: str | None = None,
 ) -> tuple[bool, str]:
 
     ids = _safe_int32_ids(list(msg_ids or []))
@@ -4748,8 +5464,10 @@ async def _walk_peer_report(
         if mid:
             ids = [mid]
     if not ids:
-        return await _report_peer_legacy(cli, peer, path, ctx_snapshot)
-    return await _walk_messages_report(cli, peer, path, ctx_snapshot, ids)
+        return await _report_peer_legacy(cli, peer, path, ctx_snapshot, sess_id=sess_id)
+    return await _walk_messages_report(
+        cli, peer, path, ctx_snapshot, ids, sess_id=sess_id
+    )
 
 async def _show_report_options(event, uid: int, title_key: str, options):
 
@@ -5303,6 +6021,7 @@ async def kb_main(uid: int):
                 ],
                 [
                     Button.text(txt(uid, "menu_report_scam"), single_use=True),
+                    Button.text(txt(uid, "menu_report_fake"), single_use=True),
                     Button.text(txt(uid, "menu_report_profile"), single_use=True),
                 ],
                 [
@@ -5330,7 +6049,8 @@ async def kb_main(uid: int):
 _REPORT_KIND_FA = {
     "msg": "ریپورت پیام",
     "story": "ریپورت استوری",
-    "scam": "ریپورت اسکم | جعلی",
+    "scam": "ریپورت اسکم (کلاهبرداری)",
+    "fake": "ریپورت فیک (جعل هویت)",
     "profile": "ریپورت پروفایل",
     "bot": "ریپورت ربات",
     "dialog": "ریپورت گفتگو",
@@ -5539,6 +6259,8 @@ async def _continue_after_report_join(event, uid: int, resume: str | None):
         await _start_dest_kind_wizard(event, "msg")
     elif resume == "scam":
         await _start_dest_kind_wizard(event, "scam")
+    elif resume == "fake":
+        await _start_dest_kind_wizard(event, "fake")
     elif resume == "story":
         await wizard_story(event)
     elif resume == "bot":
@@ -5791,6 +6513,14 @@ def build_option_keyboard(
     rows = [btns[i : i + cols] for i in range(0, len(btns), cols)]
     rows.append([Button.inline(txt(uid, "report_option_cancel"), data=b"mr:cancel")])
     return rows
+
+def dialog_reason_title(uid: int, options) -> str:
+    """Title for the dialog/profile reason menu; the reportPeer menu also
+    states that Telegram has no Scam reason there."""
+    text = txt(uid, "select_report_reason")
+    if any(bytes(getattr(o, "option", b"") or b"").startswith(b"pr:") for o in options or []):
+        text = f"{text}\n\n{txt(uid, 'peer_reason_scam_note')}"
+    return text
 
 def build_dialog_keyboard(
     uid: int, options: list[types.MessageReportOption], cols: int = 2
@@ -6342,6 +7072,25 @@ def _format_wizard_error(uid: int, payload) -> str:
         payload.startswith("EXC_ValueError") or payload.startswith("VALUE:")
     ):
         return txt(uid, "report_value_error_hint")
+    if isinstance(payload, str) and payload.endswith("_OPTION_UNAVAILABLE"):
+        code = payload[: -len("_OPTION_UNAVAILABLE")].lower()
+        if f"{code}_option_unavailable" in TRANSLATIONS:
+            return txt(uid, f"{code}_option_unavailable")
+        return txt(uid, "reason_option_unavailable", reason=_reason_label(code))
+    if payload in ("NO_OPTION", "PATH_MISMATCH"):
+        return txt(uid, "report_err_no_option")
+    if isinstance(payload, str) and payload.startswith("RPC_ERROR:"):
+        name = (payload.split(":") + [""])[1]
+        hint_key = {
+            "OPTION_INVALID": "report_err_option_invalid",
+            "MESSAGE_ID_INVALID": "report_err_message_id_invalid",
+            "MESSAGE_IDS_EMPTY": "report_err_message_id_invalid",
+            "PEER_ID_INVALID": "report_err_peer_id_invalid",
+            "CHANNEL_PRIVATE": "channel_private_hint",
+        }.get(name)
+        if hint_key:
+            return txt(uid, hint_key)
+        return txt(uid, "report_err_rpc", error=name or payload)
     return txt(uid, "error_occurred", error=payload)
 
 async def join_group(
@@ -6973,7 +7722,7 @@ async def sample_step(
         async def _report(option: bytes, msg: str = ""):
             if not _is_valid_peer(peer) or isinstance(peer, str):
                 raise ValueError(f"invalid_peer:{peer!r}"[:100])
-            if ctx["mode"] in ("msg", "scam"):
+            if ctx["mode"] in ("msg", "scam", "fake"):
                 ids = _safe_int32_ids(list(ctx.get("msg_ids") or []))
                 if not ids:
                     raise ValueError("no_valid_message_ids")
@@ -7035,6 +7784,24 @@ async def sample_step(
                 await asyncio.sleep(0.8)
                 return await _report(option, msg)
 
+        reason_code = _mode_reason_code(ctx.get("mode")) or (
+            _reason_code_from_path(path) if path else None
+        )
+        method = "stories.report" if ctx.get("mode") == "story" else "messages.report"
+
+        def _fail(e, option, step):
+            return _report_rpc_fail(
+                method,
+                e,
+                peer=peer,
+                ids=ctx.get("msg_ids") if method == "messages.report" else ctx.get("selected_story_ids"),
+                option=option,
+                reason=reason_code,
+                step=step,
+                sess=sample_sess,
+                mode=ctx.get("mode"),
+            )
+
         try:
             res = await _report_with_refresh(b"", "")
         except ValueError as e:
@@ -7044,18 +7811,25 @@ async def sample_step(
             return ("error", "report_serialization_failed")
         except errors.ChannelPrivateError:
             return ("error", "ChannelPrivateError")
+        except errors.RPCError as e:
+            if _is_frozen(e) or _is_unauthorized_like(e):
+                raise
+            return ("error", _fail(e, b"", 0))
 
         step_idx = 0
         for _ in range(14):
             if isinstance(res, types.ReportResultChooseOption):
                 if step_idx >= len(path):
                     return ("choose", res.options)
-                choice = _match_report_choice(res.options, path[step_idx])
+                choice = _choose_path_option(res.options, path, step_idx, reason_code)
                 if not choice:
                     logger.warning(
-                        "sample_step: NO_OPTION at step %s path=%s",
+                        "sample_step: NO_OPTION mode=%s reason=%s step=%s path=%s avail=%s",
+                        ctx.get("mode"),
+                        reason_code,
                         step_idx,
                         [(s.get("key"), s.get("text")) for s in path],
+                        [(_option_key(o), o.text) for o in (res.options or [])],
                     )
                     return ("error", "NO_OPTION")
                 try:
@@ -7065,6 +7839,10 @@ async def sample_step(
                     return ("error", "report_serialization_failed")
                 except errors.ChannelPrivateError:
                     return ("error", "ChannelPrivateError")
+                except errors.RPCError as e:
+                    if _is_frozen(e) or _is_unauthorized_like(e):
+                        raise
+                    return ("error", _fail(e, choice.option, step_idx + 1))
                 step_idx += 1
                 continue
             if isinstance(res, types.ReportResultAddComment):
@@ -7080,9 +7858,22 @@ async def sample_step(
                         return ("error", "report_serialization_failed")
                     except errors.ChannelPrivateError:
                         return ("error", "ChannelPrivateError")
+                    except errors.RPCError as e:
+                        if _is_frozen(e) or _is_unauthorized_like(e):
+                            raise
+                        return ("error", _fail(e, res.option, f"{step_idx}+comment"))
                     continue
                 return ("comment", res.option)
             if isinstance(res, types.ReportResultReported):
+                _report_ok_log(
+                    method,
+                    mode=ctx.get("mode"),
+                    reason=reason_code,
+                    path=path,
+                    peer=peer,
+                    sess=sample_sess,
+                    extra="sample=1",
+                )
                 return ("done", None)
             logger.warning("sample_step unexpected result: %r", type(res))
             return ("error", "UNEXPECTED")
@@ -7138,6 +7929,20 @@ async def sample_step_with_pool_fallback(
             "no_story_selected",
         ):
             return status, payload
+        if err.startswith("RPC_ERROR:"):
+            # OPTION_INVALID / MESSAGE_ID_INVALID fail the same way on every
+            # account; anything else (PEER_ID_INVALID, ...) may be per-account.
+            if any(x in err for x in ("OPTION_INVALID", "MESSAGE_ID_INVALID", "MESSAGE_IDS_EMPTY")):
+                return status, payload
+            last = (status, payload)
+            logger.warning(
+                "sample fallback uid=%s phone=%s err=%s target=%s",
+                uid,
+                sess_phone(sess),
+                err,
+                (ctx.get("target") or "")[:80],
+            )
+            continue
         retryable = (
             err.startswith("JOIN_FAILED")
             or err in ("ChannelPrivateError", "BAD_SAMPLE_SESSION", "NO_SAMPLE_SESS")
@@ -7221,6 +8026,135 @@ async def connect_session_client(
         )
     return None, last_err
 
+async def _report_target_posts(
+    cli,
+    session_id: str,
+    peer,
+    path: list,
+    ctx_snapshot: dict,
+    peer_cache: dict | None,
+    *,
+    reason_code: str,
+):
+    """messages.report the account's posts with `path`; rejoin once if the
+    account lost access. Returns (ok, info, peer, ids)."""
+    ids_list = _pick_msg_ids_for_session(ctx_snapshot, session_id)
+    if not ids_list:
+        return False, "no_valid_message_ids", peer, ids_list
+
+    async def _once(p):
+        last = "NONE"
+        for mid in ids_list:
+            ok, info = await _walk_messages_report(
+                cli, p, path, ctx_snapshot, [mid], sess_id=session_id, reason_code=reason_code
+            )
+            if ok:
+                return True, "REPORTED"
+            last = info
+            logger.warning(
+                "%s report fail mid=%s info=%s %s",
+                reason_code,
+                mid,
+                info,
+                _report_log_bits(session_id, ctx_snapshot),
+            )
+            await _report_step_pause()
+        return False, last
+
+    ok, info = await _once(peer)
+    if not ok and any(x in str(info).upper() for x in ("CHANNEL_PRIVATE", "PRIVATE", "JOIN")):
+        try:
+            _peer_cache_pop((session_id, ctx_snapshot.get("target") or ""))
+        except Exception:
+            pass
+        if peer_cache is not None:
+            peer_cache.pop(session_id, None)
+        fresh = await join_group(
+            cli,
+            ctx_snapshot["target"],
+            session_id,
+            skip_join=False,
+        )
+        if _is_valid_peer(fresh):
+            peer = fresh
+            if peer_cache is not None:
+                peer_cache[session_id] = peer
+            ok, info = await _once(peer)
+    return ok, info, peer, ids_list
+
+
+async def _run_scam_report(cli, session_id, peer, path, ctx_snapshot, peer_cache):
+    """Scam handler.
+
+    1. messages.report with Telegram's own "Scam or fraud" entry and one of its
+       scam sub-entries (fraudulent seller / phishing / financial claims).
+       "Impersonation" is refused here: that is the Fake handler.
+    2. account.reportPeer on the channel. Telegram has no Scam ReportReason,
+       so this uses InputReportReasonOther with a scam description
+       (REPORT_API_LIMIT_SCAM). It is never sent as Fake.
+    """
+    code = _reason_code_from_path(path)
+    if code != "scam":
+        logger.error(
+            "scam handler refused: path resolves to %r, not scam path=%s %s",
+            code,
+            _path_keys_for_log(path),
+            _report_log_bits(session_id, ctx_snapshot),
+        )
+        return (session_id, False, f"SCAM_PATH_INVALID:{code}")
+    ok, info, peer, _ids = await _report_target_posts(
+        cli, session_id, peer, path, ctx_snapshot, peer_cache, reason_code="scam"
+    )
+    if not ok:
+        return (session_id, False, f"SCAM_{info}")
+    comment = await _pick_comment(ctx_snapshot, need_comment=True)
+    peer_ok, peer_info = await _send_peer_report(
+        cli, peer, "scam", comment, sess_id=session_id, mode="scam"
+    )
+    if peer_ok:
+        return (session_id, True, "REPORTED+CHANNEL")
+    logger.warning(
+        "scam channel-level report failed after the post report: %s %s",
+        peer_info,
+        _report_log_bits(session_id, ctx_snapshot),
+    )
+    return (session_id, True, f"REPORTED;CHANNEL_{peer_info}")
+
+
+async def _run_fake_report(cli, session_id, peer, path, ctx_snapshot, peer_cache):
+    """Fake handler (impersonation / fake account or channel).
+
+    1. messages.report with "Scam or fraud" > "Impersonation" only.
+    2. account.reportPeer on the channel with InputReportReasonFake.
+    """
+    code = _reason_code_from_path(path)
+    if code != "fake":
+        logger.error(
+            "fake handler refused: path resolves to %r, not fake path=%s %s",
+            code,
+            _path_keys_for_log(path),
+            _report_log_bits(session_id, ctx_snapshot),
+        )
+        return (session_id, False, f"FAKE_PATH_INVALID:{code}")
+    ok, info, peer, _ids = await _report_target_posts(
+        cli, session_id, peer, path, ctx_snapshot, peer_cache, reason_code="fake"
+    )
+    if not ok:
+        return (session_id, False, f"FAKE_{info}")
+    comment = await _pick_comment(ctx_snapshot, need_comment=True)
+    peer_ok, peer_info = await _send_peer_report(
+        cli, peer, "fake", comment, sess_id=session_id, mode="fake"
+    )
+    if peer_ok:
+        return (session_id, True, "REPORTED+CHANNEL")
+    logger.warning(
+        "fake channel-level report failed after the post report: %s %s",
+        peer_info,
+        _report_log_bits(session_id, ctx_snapshot),
+    )
+    return (session_id, True, f"REPORTED;CHANNEL_{peer_info}")
+
+
 async def run_path_with_client(
     uid: int,
     session_id: str,
@@ -7285,7 +8219,22 @@ async def run_path_with_client(
         for step in path:
             step["option"] = _norm_option(step.get("option"))
 
+        story_reason = _reason_code_from_path(path) if path else None
+
         async def _walk_story_report(sid: int) -> tuple[bool, str]:
+            def _fail(e, option, step):
+                return _report_rpc_fail(
+                    "stories.report",
+                    e,
+                    peer=peer,
+                    ids=[sid],
+                    option=option,
+                    reason=story_reason,
+                    step=step,
+                    sess=session_id,
+                    mode="story",
+                )
+
             try:
                 await _global_report_gate()
                 res = await cli(
@@ -7293,10 +8242,8 @@ async def run_path_with_client(
                         peer=peer, id=[int(sid)], option=b"", message=""
                     )
                 )
-            except errors.FloodWaitError as e:
-                return False, f"FLOODWAIT_{e.seconds}s"
             except errors.RPCError as e:
-                return False, _rpc_err_info(e)
+                return False, _fail(e, b"", 0)
             except (ConnectionError, OSError) as e:
                 return False, f"CONN_{e.__class__.__name__}"
             except Exception as e:
@@ -7304,21 +8251,23 @@ async def run_path_with_client(
             step_idx = 0
             for _ in range(14):
                 if isinstance(res, types.ReportResultChooseOption):
-                    if step_idx >= len(path):
-                        return False, "PATH_MISMATCH"
-                    choice = _match_report_choice(res.options, path[step_idx])
+                    choice = _choose_path_option(res.options, path, step_idx, story_reason)
                     if not choice:
                         avail = [
                             (o.option.decode("utf-8", "ignore"), o.text)
                             for o in (res.options or [])
                         ]
                         logger.warning(
-                            "story NO_OPTION step=%s want=%s avail=%s",
+                            "story NO_OPTION reason=%s step=%s want=%s avail=%s sess=%s",
+                            story_reason,
                             step_idx,
-                            (path[step_idx].get("key"), path[step_idx].get("text")),
+                            (path[step_idx].get("key"), path[step_idx].get("text"))
+                            if step_idx < len(path)
+                            else "<beyond recorded path>",
                             avail,
+                            session_id,
                         )
-                        return False, "NO_OPTION"
+                        return False, "NO_OPTION" if step_idx < len(path) else "PATH_MISMATCH"
                     await _report_step_pause()
                     try:
                         await _global_report_gate()
@@ -7330,10 +8279,8 @@ async def run_path_with_client(
                                 message="",
                             )
                         )
-                    except errors.FloodWaitError as e:
-                        return False, f"FLOODWAIT_{e.seconds}s"
                     except errors.RPCError as e:
-                        return False, _rpc_err_info(e)
+                        return False, _fail(e, choice.option, step_idx + 1)
                     except (ConnectionError, OSError) as e:
                         return False, f"CONN_{e.__class__.__name__}"
                     except Exception as e:
@@ -7358,94 +8305,36 @@ async def run_path_with_client(
                                 message=comment,
                             )
                         )
-                    except errors.FloodWaitError as e:
-                        return False, f"FLOODWAIT_{e.seconds}s"
                     except errors.RPCError as e:
-                        return False, _rpc_err_info(e)
+                        return False, _fail(e, res.option, f"{step_idx}+comment")
                     except (ConnectionError, OSError) as e:
                         return False, f"CONN_{e.__class__.__name__}"
                     except Exception as e:
                         return False, f"EXC_{e.__class__.__name__}"
                     continue
                 if isinstance(res, types.ReportResultReported):
+                    _report_ok_log(
+                        "stories.report",
+                        mode="story",
+                        reason=story_reason,
+                        path=path,
+                        peer=peer,
+                        ids=[sid],
+                        sess=session_id,
+                    )
                     return True, "REPORTED"
                 return False, f"UNEXPECTED:{type(res).__name__}"
             return False, "MAX_STEPS"
 
         if ctx_snapshot["mode"] == "scam":
-            ids_list = _pick_msg_ids_for_session(ctx_snapshot, session_id)
-            if not ids_list:
-                return (session_id, False, "no_valid_message_ids")
-
-            last_info = "NONE"
-            any_ok = False
-
-            async def _scam_once(p):
-                last = "NONE"
-                for mid in ids_list:
-                    ok, info = await _walk_messages_report(
-                        cli, p, path, ctx_snapshot, [mid]
-                    )
-                    if ok:
-                        return True, "REPORTED"
-                    last = info
-                    logger.warning(
-                        "scam report fail mid=%s info=%s %s",
-                        mid,
-                        info,
-                        _report_log_bits(session_id, ctx_snapshot),
-                    )
-                    await _report_step_pause()
-                return False, last
-
-            any_ok, last_info = await _scam_once(peer)
-            if not any_ok and (
-                "CHANNEL_PRIVATE" in str(last_info).upper()
-                or "PRIVATE" in str(last_info).upper()
-                or "JOIN" in str(last_info).upper()
-            ):
-                try:
-                    _peer_cache_pop((session_id, ctx_snapshot.get("target") or ""))
-                except Exception:
-                    pass
-                if peer_cache is not None:
-                    peer_cache.pop(session_id, None)
-                fresh = await join_group(
-                    cli,
-                    ctx_snapshot["target"],
-                    session_id,
-                    skip_join=False,
-                )
-                if _is_valid_peer(fresh):
-                    peer = fresh
-                    if peer_cache is not None:
-                        peer_cache[session_id] = peer
-                    any_ok, last_info = await _scam_once(peer)
-
-            if not any_ok:
-                return (session_id, False, f"SCAM_{last_info}")
-
-            peer_ok, peer_info = await _report_peer_legacy(
-                cli,
-                peer,
-                path,
-                ctx_snapshot,
-                force_reason=types.InputReportReasonFake(),
+            return await _run_scam_report(
+                cli, session_id, peer, path, ctx_snapshot, peer_cache
             )
-            if not peer_ok:
-                peer_ok2, peer_info2 = await _walk_peer_report(
-                    cli, peer, path, ctx_snapshot, msg_ids=ids_list[:1]
-                )
-                if peer_ok2:
-                    return (session_id, True, "REPORTED+CHANNEL")
-                logger.warning(
-                    "scam channel peer-report after msg: legacy=%s walk=%s %s",
-                    peer_info,
-                    peer_info2,
-                    _report_log_bits(session_id, ctx_snapshot),
-                )
-                return (session_id, True, f"REPORTED;CHANNEL_{peer_info2 or peer_info}")
-            return (session_id, True, "REPORTED+CHANNEL")
+
+        if ctx_snapshot["mode"] == "fake":
+            return await _run_fake_report(
+                cli, session_id, peer, path, ctx_snapshot, peer_cache
+            )
 
         if ctx_snapshot["mode"] == "msg":
             ids_list = _pick_msg_ids_for_session(ctx_snapshot, session_id)
@@ -7456,7 +8345,7 @@ async def run_path_with_client(
             any_ok = False
             for mid in ids_list:
                 ok, info = await _walk_messages_report(
-                    cli, peer, path, ctx_snapshot, [mid]
+                    cli, peer, path, ctx_snapshot, [mid], sess_id=session_id
                 )
                 if ok:
                     any_ok = True
@@ -7488,7 +8377,7 @@ async def run_path_with_client(
                         if peer_cache is not None:
                             peer_cache[session_id] = peer
                         ok2, info2 = await _walk_messages_report(
-                            cli, peer, path, ctx_snapshot, [mid]
+                            cli, peer, path, ctx_snapshot, [mid], sess_id=session_id
                         )
                         if ok2:
                             any_ok = True
@@ -7500,7 +8389,7 @@ async def run_path_with_client(
 
             if _path_needs_channel_ban(ctx_snapshot):
                 peer_ok, peer_info = await _walk_peer_report(
-                    cli, peer, path, ctx_snapshot, msg_ids=ids_list[:1]
+                    cli, peer, path, ctx_snapshot, msg_ids=ids_list[:1], sess_id=session_id
                 )
                 if peer_ok:
                     return (session_id, True, "REPORTED+CHANNEL")
@@ -7549,7 +8438,17 @@ async def run_path_with_client(
         if _is_frozen(e) or _is_unauthorized_like(e):
             await drop_account(session_id, reason="frozen/unauthorized")
             return (session_id, False, "REMOVED_FROZEN_OR_DELETED")
-        return (session_id, False, f"RPC_{_rpc_err_info(e)}")
+        return (
+            session_id,
+            False,
+            _report_rpc_fail(
+                "report_worker",
+                e,
+                reason=_reason_code_from_path(ctx_snapshot.get("path") or []),
+                sess=session_id,
+                mode=ctx_snapshot.get("mode"),
+            ),
+        )
     except ValueError as e:
         logger.warning(
             "report worker ValueError %s: %s",
@@ -7598,7 +8497,7 @@ async def run_dialog_with_client(
             rpt = max(0, int(rpt))
             for _ in range(rpt):
                 ok_peer, info_peer = await _report_peer_legacy(
-                    cli, peer, path, ctx_snapshot
+                    cli, peer, path, ctx_snapshot, sess_id=sess_file
                 )
                 if ok_peer:
                     ok += 1
@@ -7628,6 +8527,21 @@ async def run_dialog_with_client(
         ok = 0
         last = "NONE"
         rpt = max(0, int(rpt))
+        reason_code = _reason_code_from_path(path) if path else None
+
+        if _path_is_peer_reason(path):
+            # The probe had no message, so the user picked an account.reportPeer
+            # reason (pr:<code>); replay exactly that call.
+            for _ in range(max(1, rpt)):
+                ok_peer, info_peer = await _report_peer_legacy(
+                    cli, peer, path, ctx_snapshot, sess_id=sess_file
+                )
+                last = info_peer
+                if not ok_peer:
+                    break
+                ok += 1
+                await asyncio.sleep(random.uniform(1.0, 2.2))
+            return (sess_file, ok, rpt, last)
 
         report_ids = _safe_int32_ids(list(ctx_snapshot.get("msg_ids") or []))
         if not report_ids:
@@ -7636,96 +8550,88 @@ async def run_dialog_with_client(
                 report_ids = [mid]
         if not report_ids:
             ok_peer, info_peer = await _report_peer_legacy(
-                cli, peer, path, ctx_snapshot
+                cli, peer, path, ctx_snapshot, sess_id=sess_file
             )
             if ok_peer:
                 return (sess_file, max(1, rpt), rpt, info_peer)
             return (sess_file, 0, rpt, info_peer)
-        for _ in range(rpt):
-            if not _is_valid_peer(peer) or isinstance(peer, str):
-                last = _join_fail_reason(peer) or "JOIN_FAILED"
-                break
+
+        async def _send(option: bytes, message: str, step):
+            nonlocal last
             try:
-                res = await cli(
+                return await cli(
                     functions.messages.ReportRequest(
-                        peer=peer, id=report_ids[:1], option=b"", message=""
+                        peer=peer,
+                        id=report_ids[:1],
+                        option=option,
+                        message=message,
                     )
                 )
-            except errors.FloodWaitError as e:
-                last = f"FLOODWAIT_{e.seconds}s"
-                break
             except errors.RPCError as e:
                 if _is_frozen(e) or _is_unauthorized_like(e):
                     await drop_account(sess_file, reason="frozen/unauthorized")
                     last = "REMOVED_FROZEN_OR_DELETED"
                 else:
-                    last = f"RPC_{e.__class__.__name__}"
-                break
+                    last = _report_rpc_fail(
+                        "messages.report",
+                        e,
+                        peer=peer,
+                        ids=report_ids[:1],
+                        option=option,
+                        reason=reason_code,
+                        step=step,
+                        sess=sess_file,
+                        mode=ctx_snapshot.get("mode"),
+                    )
             except Exception as e:
                 last = f"EXC_{e.__class__.__name__}"
+            return None
+
+        for _ in range(rpt):
+            if not _is_valid_peer(peer) or isinstance(peer, str):
+                last = _join_fail_reason(peer) or "JOIN_FAILED"
+                break
+            res = await _send(b"", "", 0)
+            if res is None:
                 break
             step_idx = 0
             for _ in range(12):
                 if isinstance(res, types.ReportResultChooseOption):
-                    if step_idx >= len(path):
-                        last = "PATH_MISMATCH"
-                        break
-                    choice = _match_report_choice(res.options, path[step_idx])
+                    choice = _choose_path_option(res.options, path, step_idx, reason_code)
                     if not choice:
-                        last = "NO_OPTION"
-                        break
-                    try:
-                        res = await cli(
-                            functions.messages.ReportRequest(
-                                peer=peer,
-                                id=report_ids[:1],
-                                option=choice.option,
-                                message="",
-                            )
+                        logger.warning(
+                            "dialog NO_OPTION reason=%s step=%s path=%s avail=%s sess=%s",
+                            reason_code,
+                            step_idx,
+                            _path_keys_for_log(path),
+                            [(_option_key(o), o.text) for o in (res.options or [])],
+                            sess_file,
                         )
-                    except errors.FloodWaitError as e:
-                        last = f"FLOODWAIT_{e.seconds}s"
+                        last = "NO_OPTION" if step_idx < len(path) else "PATH_MISMATCH"
                         break
-                    except errors.RPCError as e:
-                        if _is_frozen(e) or _is_unauthorized_like(e):
-                            await drop_account(sess_file, reason="unauthorized")
-                            last = "REMOVED_FROZEN_OR_DELETED"
-                        else:
-                            last = f"RPC_{e.__class__.__name__}"
-                        break
-                    except Exception as e:
-                        last = f"EXC_{e.__class__.__name__}"
+                    res = await _send(choice.option, "", step_idx + 1)
+                    if res is None:
                         break
                     step_idx += 1
                     continue
                 if isinstance(res, types.ReportResultAddComment):
-                    try:
-                        msg_text = await _pick_comment(ctx_snapshot, need_comment=True)
-                        res = await cli(
-                            functions.messages.ReportRequest(
-                                peer=peer,
-                                id=report_ids[:1],
-                                option=res.option,
-                                message=msg_text,
-                            )
-                        )
-                    except errors.FloodWaitError as e:
-                        last = f"FLOODWAIT_{e.seconds}s"
-                        break
-                    except errors.RPCError as e:
-                        if _is_frozen(e) or _is_unauthorized_like(e):
-                            await drop_account(sess_file, reason="unauthorized")
-                            last = "REMOVED_FROZEN_OR_DELETED"
-                        else:
-                            last = f"RPC_{e.__class__.__name__}"
-                        break
-                    except Exception as e:
-                        last = f"EXC_{e.__class__.__name__}"
+                    msg_text = await _pick_comment(ctx_snapshot, need_comment=True)
+                    res = await _send(res.option, msg_text, f"{step_idx}+comment")
+                    if res is None:
                         break
                     continue
                 if isinstance(res, types.ReportResultReported):
                     ok += 1
                     last = "REPORTED"
+                    _report_ok_log(
+                        "messages.report",
+                        mode=ctx_snapshot.get("mode"),
+                        reason=reason_code,
+                        path=path,
+                        peer=peer,
+                        ids=report_ids[:1],
+                        sess=sess_file,
+                    )
                     break
                 last = "UNEXPECTED"
                 break
@@ -7780,7 +8686,8 @@ async def ask_num_accounts(event, uid, pool):
         return
     return num
 
-async def _auto_scam_comment_then_start(event, uid, ctx, payload):
+async def _auto_comment_then_start(event, uid, ctx, payload, mode: str):
+    """Scam / Fake: send the sample report's comment automatically, then run."""
     auto_msg = await _pick_comment(ctx, need_comment=True)
     ctx["comment"] = auto_msg
     ctx["comments"] = [auto_msg]
@@ -7800,7 +8707,7 @@ async def _auto_scam_comment_then_start(event, uid, ctx, payload):
                 await event.respond(txt(uid, "path_complete"))
             except Exception:
                 pass
-        await start_continuous_report(event, uid, ctx, "scam", need_comment=True)
+        await start_continuous_report(event, uid, ctx, mode, need_comment=True)
     else:
         if str(err or "") in (
             "ChannelPrivateError",
@@ -7810,7 +8717,7 @@ async def _auto_scam_comment_then_start(event, uid, ctx, payload):
             await event.respond(txt(uid, "channel_private_hint"))
         else:
             await event.respond(
-                txt(uid, "error_occurred", error=err or "COMMENT_AUTO_FAILED")
+                _format_wizard_error(uid, err or "COMMENT_AUTO_FAILED")
             )
         await ctx_pop(uid)
 
@@ -7861,7 +8768,7 @@ async def _finish_after_comment_source(event, uid, ctx):
     if (
         do_sample
         and ctx.get("add_comment_option") is not None
-        and mode in ("msg", "story", "scam")
+        and mode in ("msg", "story", "scam", "fake")
     ):
         msg = await _pick_comment(ctx, need_comment=True)
         status2, err = await sample_step_with_pool_fallback(
@@ -7939,7 +8846,7 @@ async def on_comment_source_choice(event: events.CallbackQuery.Event):
 async def start_continuous_report(event, uid, ctx, mode, need_comment):
     if not await ensure_report_channel_member(event, uid, resume="report"):
         return
-    if mode != "scam" and (ctx.get("comment_source") or "").strip().lower() not in (
+    if mode not in ("scam", "fake") and (ctx.get("comment_source") or "").strip().lower() not in (
         "ai",
         "text",
     ):
@@ -8016,7 +8923,7 @@ async def start_continuous_report(event, uid, ctx, mode, need_comment):
     if (
         not ctx.get("skip_join")
         and not ctx.get("jr_confirmed")
-        and mode in ("msg", "scam", "dialog")
+        and mode in ("msg", "scam", "fake", "dialog")
     ):
         stats = await preflight_join_check(uid, pool, ctx["target"])
         joined, retryable, skipped, reasons = _preflight_keep_accounts(stats)
@@ -8170,7 +9077,7 @@ async def start_continuous_report(event, uid, ctx, mode, need_comment):
 
         async def run_one(sess, cli=None, peer_cache=None):
             timeout = op_timeout
-            if mode in ("msg", "story", "scam"):
+            if mode in ("msg", "story", "scam", "fake"):
                 _, success, info = await asyncio.wait_for(
                     run_path_with_client(
                         uid,
@@ -8614,7 +9521,7 @@ async def continue_bot_wizard(uid, ctx, event):
             _remember_report_options(ctx, payload)
             await ctx_set(uid, ctx)
             await event.respond(
-                txt(uid, "select_report_reason"),
+                dialog_reason_title(uid, payload),
                 buttons=build_dialog_keyboard(uid, payload),
             )
         elif status == "comment":
@@ -8807,7 +9714,7 @@ async def continue_dialog_wizard(uid, ctx, event):
             _remember_report_options(ctx, payload)
             await ctx_set(uid, ctx)
             await event.respond(
-                txt(uid, "select_report_reason"),
+                dialog_reason_title(uid, payload),
                 buttons=build_dialog_keyboard(uid, payload),
             )
         elif status == "comment":
@@ -8823,6 +9730,145 @@ async def continue_dialog_wizard(uid, ctx, event):
     finally:
         await cli.disconnect()
 
+async def _auto_walk_reason(
+    uid: int,
+    ctx: dict,
+    pool: list,
+    code: str,
+    *,
+    choose_at_level: int | None = None,
+    allow_user_choice: bool = True,
+):
+    """Drive the probe account through Telegram's own report menu for `code`.
+
+    Every level is chosen from the options Telegram actually returned, using
+    REPORT_REASON_SPECS; options of another reason are never chosen. At
+    `choose_at_level` (or below the registered levels) the remaining options
+    are handed back as ("choose", options) for the user to pick.
+    Returns sample_step-style (status, payload).
+    """
+    status, payload = await sample_step_with_pool_fallback(uid, ctx, pool)
+    spec = _reason_spec(code)
+    for _ in range(8):
+        if status in ("comment", "done"):
+            got = _reason_code_from_path(ctx.get("path") or [])
+            if got != code:
+                logger.error(
+                    "report menu ended on a path for %r while %r was requested path=%s target=%s",
+                    got,
+                    code,
+                    _path_keys_for_log(ctx.get("path")),
+                    (ctx.get("target") or "")[:80],
+                )
+                return "error", f"{code.upper()}_OPTION_UNAVAILABLE"
+            return status, payload
+        if status != "choose":
+            return status, payload
+        level = len(ctx.get("path") or [])
+        user_level = level == choose_at_level or spec is None or level >= len(spec.levels)
+        if user_level:
+            allowed = _reason_sub_options(payload, code)
+            if len(allowed) == 1:
+                choice = allowed[0]
+            elif allowed and allow_user_choice:
+                return "choose", allowed
+            else:
+                choice = _pick_reason_option(payload, code, level)
+        else:
+            choice = _pick_reason_option(payload, code, level)
+        if choice is None:
+            logger.warning(
+                "report reason unavailable code=%s level=%s path=%s avail=%s target=%s",
+                code,
+                level,
+                _path_keys_for_log(ctx.get("path")),
+                [(_option_key(o), o.text) for o in (payload or [])],
+                (ctx.get("target") or "")[:80],
+            )
+            return "error", f"{code.upper()}_OPTION_UNAVAILABLE"
+        ctx.setdefault("path", []).append(
+            _path_step_from_option(uid, choice.option, options_list=payload)
+        )
+        await ctx_set(uid, ctx)
+        status, payload = await sample_step_with_pool_fallback(
+            uid, ctx, ctx.get("pool") or pool
+        )
+    return "error", "MAX_STEPS"
+
+
+async def _pick_post_report_pool(uid, ctx, event) -> list | None:
+    """Accounts for a post report (forced join pool or user's choice)."""
+    if ctx.get("forced_pool"):
+        pool_requested = ctx["forced_pool"]
+        active_pool = await list_session_files(uid)
+        selected = [s for s in pool_requested if s in active_pool]
+        if not selected:
+            await event.respond(txt(uid, "no_requested_accounts_available"))
+            await ctx_pop(uid)
+            return None
+        return selected
+    pool = await list_session_files(uid)
+    if not pool:
+        await event.respond(txt(uid, "no_session_found"))
+        await ctx_pop(uid)
+        return None
+    num = await ask_num_accounts(event, uid, pool)
+    if num is None:
+        await ctx_pop(uid)
+        return None
+    return random.sample(pool, min(num, len(pool)))
+
+
+async def _after_reason_walk(event, uid, ctx, mode: str, status, payload):
+    if status == "choose":
+        _remember_report_options(ctx, payload)
+        await ctx_set(uid, ctx)
+        await _show_report_options(event, uid, f"{mode}_pick_subtype", payload)
+    elif status == "comment":
+        await _auto_comment_then_start(event, uid, ctx, payload, mode)
+    elif status == "done":
+        try:
+            await event.edit(txt(uid, "path_complete"))
+        except Exception:
+            await event.respond(txt(uid, "path_complete"))
+        await start_continuous_report(event, uid, ctx, mode, need_comment=True)
+    else:
+        await event.respond(_format_wizard_error(uid, payload))
+        await ctx_pop(uid)
+
+
+async def probe_scam_path(event, uid, ctx, selected):
+    """Scam: Telegram's "Scam or fraud" entry, then the user picks the scam
+    type from Telegram's own sub-options (Impersonation is not offered here;
+    that is the Fake report)."""
+    ctx["pool"] = selected
+    ctx["path"] = []
+    sess0 = await resolve_probe_session(event, uid, selected)
+    if not sess0:
+        await ctx_pop(uid)
+        return
+    ctx["sample"] = {"sess": sess0}
+    await ctx_set(uid, ctx)
+    status, payload = await _auto_walk_reason(
+        uid, ctx, selected, "scam", choose_at_level=1
+    )
+    await _after_reason_walk(event, uid, ctx, "scam", status, payload)
+
+
+async def probe_fake_path(event, uid, ctx, selected):
+    """Fake: Telegram's "Scam or fraud" > "Impersonation" only."""
+    ctx["pool"] = selected
+    ctx["path"] = []
+    sess0 = await resolve_probe_session(event, uid, selected)
+    if not sess0:
+        await ctx_pop(uid)
+        return
+    ctx["sample"] = {"sess": sess0}
+    await ctx_set(uid, ctx)
+    status, payload = await _auto_walk_reason(uid, ctx, selected, "fake")
+    await _after_reason_walk(event, uid, ctx, "fake", status, payload)
+
+
 async def continue_scam_wizard(uid, ctx, event):
     if _parse_target(ctx.get("target") or "")[0] == "id" and _is_private_peer_target(ctx.get("target") or ""):
         await event.respond(txt(uid, "wizard_public_not_private"))
@@ -8831,51 +9877,24 @@ async def continue_scam_wizard(uid, ctx, event):
     if uid in ADMIN_IDS and not ctx.get("forced_pool"):
         await ask_pool_admin(event, uid)
         return
+    selected = await _pick_post_report_pool(uid, ctx, event)
+    if not selected:
+        return
+    await probe_scam_path(event, uid, ctx, selected)
 
-    if ctx.get("forced_pool"):
-        pool_requested = ctx["forced_pool"]
-        active_pool = await list_session_files(uid)
-        selected = [s for s in pool_requested if s in active_pool]
-        if not selected:
-            await event.respond(txt(uid, "no_requested_accounts_available"))
-            await ctx_pop(uid)
-            return
-    else:
-        pool = await list_session_files(uid)
-        if not pool:
-            await event.respond(txt(uid, "no_session_found"))
-            await ctx_pop(uid)
-            return
-        num = await ask_num_accounts(event, uid, pool)
-        if num is None:
-            await ctx_pop(uid)
-            return
-        selected = random.sample(pool, min(num, len(pool)))
 
-    ctx["pool"] = selected
-    sess0 = await resolve_probe_session(event, uid, selected)
-    if not sess0:
+async def continue_fake_wizard(uid, ctx, event):
+    if _parse_target(ctx.get("target") or "")[0] == "id" and _is_private_peer_target(ctx.get("target") or ""):
+        await event.respond(txt(uid, "wizard_public_not_private"))
         await ctx_pop(uid)
         return
-
-    ctx["sample"] = {"sess": sess0}
-    await ctx_set(uid, ctx)
-
-    status, payload = await sample_step_with_pool_fallback(uid, ctx, selected)
-    if status == "choose":
-        _remember_report_options(ctx, payload)
-    await ctx_set(uid, ctx)
-
-    if status == "choose":
-        await _show_report_options(event, uid, "select_report_reason", payload)
-    elif status == "comment":
-        await _auto_scam_comment_then_start(event, uid, ctx, payload)
-    elif status == "done":
-        await event.edit(txt(uid, "path_complete"))
-        await start_continuous_report(event, uid, ctx, "scam", need_comment=False)
-    else:
-        await event.respond(_format_wizard_error(uid, payload))
-        await ctx_pop(uid)
+    if uid in ADMIN_IDS and not ctx.get("forced_pool"):
+        await ask_pool_admin(event, uid)
+        return
+    selected = await _pick_post_report_pool(uid, ctx, event)
+    if not selected:
+        return
+    await probe_fake_path(event, uid, ctx, selected)
 
 @bot.on(events.CallbackQuery(pattern=b"join_yes|join_no|join_cancel"))
 async def on_join_choice(event):
@@ -8920,6 +9939,8 @@ async def on_join_choice(event):
         await continue_dialog_wizard(uid, ctx, event)
     elif mode == "scam":
         await continue_scam_wizard(uid, ctx, event)
+    elif mode == "fake":
+        await continue_fake_wizard(uid, ctx, event)
     elif mode == "bot":
         await continue_bot_wizard(uid, ctx, event)
 
@@ -9268,28 +10289,9 @@ async def on_admin_pool_choice(event):
         )
         return
     elif ctx["mode"] == "scam":
-        sess0 = await resolve_probe_session(event, uid, selected_pool)
-        if not sess0:
-            await ctx_pop(uid)
-            return
-        ctx["sample"] = {"sess": sess0}
-        await ctx_set(uid, ctx)
-        status, payload = await sample_step_with_pool_fallback(uid, ctx, selected_pool)
-        if status == "choose":
-            _remember_report_options(ctx, payload)
-            await ctx_set(uid, ctx)
-            await event.respond(
-                txt(uid, "select_report_reason"),
-                buttons=build_option_keyboard(uid, payload),
-            )
-        elif status == "comment":
-            await _auto_scam_comment_then_start(event, uid, ctx, payload)
-        elif status == "done":
-            await event.edit(txt(uid, "path_complete_start"))
-            await start_continuous_report(event, uid, ctx, "scam", need_comment=False)
-        else:
-            await event.respond(txt(uid, "error_occurred", error=payload))
-            await ctx_pop(uid)
+        await probe_scam_path(event, uid, ctx, selected_pool)
+    elif ctx["mode"] == "fake":
+        await probe_fake_path(event, uid, ctx, selected_pool)
 
     else:
         mode = ctx.get("mode") or "dialog"
@@ -9327,7 +10329,7 @@ async def on_admin_pool_choice(event):
                 _remember_report_options(ctx, payload)
                 await ctx_set(uid, ctx)
                 await event.respond(
-                    txt(uid, "select_report_reason"),
+                    dialog_reason_title(uid, payload),
                     buttons=build_dialog_keyboard(uid, payload),
                 )
             elif status == "comment":
@@ -9452,6 +10454,8 @@ async def _read_post_target(conv, uid: int, prompt_key: str):
             return None
     return raw, target, msg_ids
 
+_DEST_INTRO = {"scam": "report_scam_intro", "fake": "report_fake_intro"}
+
 async def _start_dest_kind_wizard(event, mode: str):
     uid = UID(event)
     if not await has_access(uid):
@@ -9460,13 +10464,19 @@ async def _start_dest_kind_wizard(event, mode: str):
         return
     await ctx_pop(uid)
     await ctx_set(uid, {"mode": mode, "awaiting_dest_kind": True})
-    await event.respond(txt(uid, "report_dest_ask"), buttons=_dest_kind_buttons(uid))
+    text = txt(uid, "report_dest_ask")
+    if mode in _DEST_INTRO:
+        text = f"{txt(uid, _DEST_INTRO[mode])}\n\n{text}"
+    await event.respond(text, buttons=_dest_kind_buttons(uid))
 
 async def wizard_msg(event: events.NewMessage.Event):
     await _start_dest_kind_wizard(event, "msg")
 
 async def wizard_scam(event: events.NewMessage.Event):
     await _start_dest_kind_wizard(event, "scam")
+
+async def wizard_fake(event: events.NewMessage.Event):
+    await _start_dest_kind_wizard(event, "fake")
 
 async def _collect_post_report(event, uid: int, mode: str, code: str):
     private = str(code).startswith("prv")
@@ -9563,6 +10573,8 @@ async def _collect_post_report(event, uid: int, mode: str, code: str):
             return
         if mode == "scam":
             await continue_scam_wizard(uid, ctx, event)
+        elif mode == "fake":
+            await continue_fake_wizard(uid, ctx, event)
         else:
             await continue_msg_wizard(uid, ctx, event)
     except MenuInterrupt:
@@ -9582,7 +10594,7 @@ async def on_report_dest_kind(event):
         await event.answer()
         return
     mode = ctx.get("mode") or "msg"
-    if mode not in ("msg", "scam"):
+    if mode not in ("msg", "scam", "fake"):
         await event.answer()
         return
     code = event.data.decode().split(":", 1)[1]
@@ -9611,7 +10623,7 @@ async def on_dest_kind_text(event):
             raise events.StopPropagation
         return
     mode = ctx.get("mode") or "msg"
-    if mode not in ("msg", "scam"):
+    if mode not in ("msg", "scam", "fake"):
         return
     ctx["awaiting_dest_kind"] = False
     await ctx_set(uid, ctx)
@@ -9977,17 +10989,9 @@ async def wizard_send_pv(event: events.NewMessage.Event):
 
 AI_ANALYZE_LIMIT = int(os.getenv("AI_ANALYZE_LIMIT", "60"))
 
-_AI_REASON_STEP = {
-    "scam": {"text": "fake scam", "raw_text": "Scam", "key": "fake"},
-    "fake": {"text": "fake scam", "raw_text": "Fake", "key": "fake"},
-    "spam": {"text": "spam", "raw_text": "Spam", "key": "spam"},
-    "violence": {"text": "violence", "raw_text": "Violence", "key": "violence"},
-    "porn": {"text": "pornography", "raw_text": "Pornography", "key": "porn"},
-    "drugs": {"text": "illegal drugs", "raw_text": "Illegal drugs", "key": "drugs"},
-    "copyright": {"text": "copyright", "raw_text": "Copyright", "key": "copyright"},
-    "personal": {"text": "personal details", "raw_text": "Personal details", "key": "personal"},
-    "other": {"text": "other", "raw_text": "Other", "key": "other"},
-}
+# AI verdicts use the same reason codes as every other report flow.
+_AI_REASONS = REPORT_REASON_CODES
+_AI_MODE_FOR_REASON = {"scam": "scam", "fake": "fake"}
 
 async def _openai_chat_raw(
     settings: dict, system: str, user_prompt: str, *, max_tokens: int = 800
@@ -10035,10 +11039,12 @@ async def _ai_analyze_channel(target: str, messages: list[tuple[int, str]]) -> l
     )
     user_prompt = (
         "Analyze the following channel/group posts. For EACH post that is reportable "
-        "(scam, fraud, impersonation, spam, violence/terror, pornography, illegal drugs, "
-        "copyright, or leaking personal data), include it in the output. "
-        "Pick ONE reason from exactly this set: "
-        "scam, spam, violence, porn, drugs, copyright, personal, other. "
+        "(scam/fraud, impersonation/fake account, spam, violence/terror, pornography, "
+        "child abuse, illegal drugs, copyright, or leaking personal data), include it in "
+        "the output. Pick ONE reason from exactly this set: "
+        "scam (fraud, phishing, fraudulent seller or service, fake financial promises), "
+        "fake (impersonating another person, brand or channel), spam, violence, porn, "
+        "child, drugs, personal, copyright, other. "
         "Give a short 'why' in Persian (max 12 words). "
         'Return ONLY a JSON array like: '
         '[{"id":123,"reason":"scam","why":"..."}]. '
@@ -10065,9 +11071,9 @@ async def _ai_analyze_channel(target: str, messages: list[tuple[int, str]]) -> l
             continue
         if mid not in valid_ids or mid in seen:
             continue
-        reason = str(it.get("reason") or "scam").strip().lower()
-        if reason not in _AI_REASON_STEP:
-            reason = "scam"
+        reason = str(it.get("reason") or "other").strip().lower()
+        if reason not in _AI_REASONS:
+            reason = "other"
         why = re.sub(r"\s+", " ", str(it.get("why") or "")).strip()[:120]
         out.append({"id": mid, "reason": reason, "why": why})
         seen.add(mid)
@@ -10123,26 +11129,6 @@ def _build_post_link(target: str, username: str | None, msg_id: int) -> str:
             tok = tok[1:]
         return f"https://t.me/c/{tok}/{msg_id}"
     return f"{target} (#{msg_id})"
-
-async def _auto_build_scam_path(uid: int, ctx: dict, pool: list[str], reason: str):
-    status, payload = await sample_step_with_pool_fallback(uid, ctx, pool)
-    guard = 0
-    while status == "choose" and guard < 6:
-        guard += 1
-        step = _AI_REASON_STEP.get(reason) or _AI_REASON_STEP["scam"]
-        choice = _match_report_choice(payload, step)
-        if not choice:
-            choice = _match_report_choice(payload, _AI_REASON_STEP["scam"])
-        if not choice and payload:
-            choice = payload[0]
-        if not choice:
-            return "error", "NO_OPTION"
-        ctx.setdefault("path", []).append(
-            _path_step_from_option(uid, choice.option, options_list=payload)
-        )
-        await ctx_set(uid, ctx)
-        status, payload = await sample_step(uid, ctx)
-    return status, payload
 
 async def wizard_ai_analyze(event: events.NewMessage.Event):
     uid = UID(event)
@@ -10237,8 +11223,11 @@ async def wizard_ai_analyze(event: events.NewMessage.Event):
 
     await event.respond(txt(uid, "ai_analyze_reporting", count=len(reportable_ids)))
 
+    # Each reason keeps its own route: scam -> Scam handler, fake -> Fake
+    # handler, everything else -> the normal post report with that reason.
+    ai_mode = _AI_MODE_FOR_REASON.get(dominant, "msg")
     ctx = {
-        "mode": "scam",
+        "mode": ai_mode,
         "target": target,
         "entity_kind": _infer_entity_kind(target, None),
         "msg_ids": reportable_ids,
@@ -10256,10 +11245,20 @@ async def wizard_ai_analyze(event: events.NewMessage.Event):
     }
     await ctx_set(uid, ctx)
 
-    status, payload = await _auto_build_scam_path(uid, ctx, selected, dominant)
+    status, payload = await _auto_walk_reason(
+        uid, ctx, selected, dominant, allow_user_choice=False
+    )
+    logger.info(
+        "ai report path uid=%s reason=%s mode=%s status=%s path=%s",
+        uid,
+        dominant,
+        ai_mode,
+        status,
+        _path_keys_for_log(ctx.get("path")),
+    )
     if status in ("done", "comment"):
         await ctx_set(uid, ctx)
-        await start_continuous_report(event, uid, ctx, "scam", need_comment=True)
+        await start_continuous_report(event, uid, ctx, ai_mode, need_comment=True)
     else:
         await event.respond(
             txt(uid, "ai_analyze_failed", error=str(payload)[:150])
@@ -10819,6 +11818,8 @@ async def main_menu_text_handler(event: events.NewMessage.Event):
         await start_purchase(event, "special")
     elif action == "report_scam":
         await wizard_scam(event)
+    elif action == "report_fake":
+        await wizard_fake(event)
 
     elif action == "report_profile":
         await wizard_profile(event)
@@ -11532,7 +12533,7 @@ async def on_menu_choose(event: events.CallbackQuery.Event):
     await event.answer()
     uid = UID(event)
     ctx = await ctx_get(uid)
-    if not ctx or ctx["mode"] not in ("msg", "story", "scam"):
+    if not ctx or ctx["mode"] not in ("msg", "story", "scam", "fake"):
         await event.answer(txt(uid, "session_not_found"), alert=True)
         return
     data = event.data
@@ -11546,11 +12547,30 @@ async def on_menu_choose(event: events.CallbackQuery.Event):
     if not opt:
         await event.answer(txt(uid, "invalid_input"), alert=True)
         return
+    mode = ctx["mode"]
+    reason_code = _mode_reason_code(mode)
     last_opts = _deserialize_report_options(ctx.get("last_report_options"))
+    if reason_code:
+        # Scam / Fake only accept the options they offered (stale or forged
+        # buttons cannot switch a Scam report to Impersonation or back).
+        picked = next((o for o in last_opts if o.option == opt), None)
+        if picked is None or _option_forbidden_for(reason_code, picked):
+            logger.warning(
+                "menu choice rejected mode=%s option=%r offered=%s",
+                mode,
+                opt,
+                [_option_key(o) for o in last_opts],
+            )
+            await event.answer(txt(uid, "invalid_input"), alert=True)
+            return
     ctx.setdefault("path", []).append(
         _path_step_from_option(uid, opt, options_list=last_opts or None)
     )
     status, payload = await sample_step(uid, ctx, option_bytes=opt)
+    if status == "choose" and reason_code:
+        payload = _reason_sub_options(payload, reason_code)
+        if not payload:
+            status, payload = "error", f"{reason_code.upper()}_OPTION_UNAVAILABLE"
     if status == "choose":
         _remember_report_options(ctx, payload)
     await ctx_set(uid, ctx)
@@ -11558,14 +12578,14 @@ async def on_menu_choose(event: events.CallbackQuery.Event):
         await _show_report_options(event, uid, "select_next_option", payload)
         return
     if status == "comment":
-        if ctx.get("mode") == "scam":
-            await _auto_scam_comment_then_start(event, uid, ctx, payload)
+        if reason_code:
+            await _auto_comment_then_start(event, uid, ctx, payload, mode)
             return
         await ask_comment_source(
             event,
             uid,
             ctx,
-            mode=ctx["mode"],
+            mode=mode,
             need_comment=True,
             sample_option=payload,
         )
@@ -11579,7 +12599,7 @@ async def on_menu_choose(event: events.CallbackQuery.Event):
             event,
             uid,
             ctx,
-            ctx["mode"],
+            mode,
             need_comment=True if _path_needs_channel_ban(ctx) else False,
         )
         return
@@ -11595,7 +12615,7 @@ async def on_comment(event: events.NewMessage.Event):
     ctx = await ctx_get(uid)
     if (
         not ctx
-        or ctx.get("mode") not in ("msg", "story", "scam")
+        or ctx.get("mode") not in ("msg", "story", "scam", "fake")
         or not ctx.get("awaiting_comment")
     ):
         return
@@ -11658,78 +12678,76 @@ async def dialog_probe(
     sess_id: str | None = None,
     *,
     prefer_peer: bool = False,
+    path: list | None = None,
 ):
+    async def _peer_report():
+        if path:
+            code = _reason_code_from_path(path)
+        else:
+            code = _peer_code_from_option(next_opt)
+        ok, info = await _send_peer_report(
+            cli,
+            peer,
+            code,
+            "Violation of Telegram Terms of Service.",
+            sess_id=sess_id,
+            mode="profile" if prefer_peer else "dialog",
+        )
+        if ok:
+            return ("done", None)
+        if info.startswith("RPC_ERROR:") and any(
+            x in info
+            for x in (
+                "FROZEN",
+                "SESSION_REVOKED",
+                "AUTH_KEY_UNREGISTERED",
+                "USER_DEACTIVATED",
+                "PHONE_NUMBER_BANNED",
+            )
+        ):
+            if sess_id:
+                await drop_account(sess_id, reason="frozen/unauthorized")
+            return ("error", "REMOVED_FROZEN_OR_DELETED")
+        return ("error", info)
+
     if prefer_peer:
         if next_opt is None:
             return ("choose", _peer_report_options())
-        reason = _peer_reason_from_option(_norm_option(next_opt) or next_opt)
-        try:
-            ok = await cli(
-                functions.account.ReportPeerRequest(
-                    peer=peer,
-                    reason=reason,
-                    message="Violation of Telegram Terms of Service.",
-                )
-            )
-        except errors.FloodWaitError as e:
-            return ("error", f"FLOODWAIT_{e.seconds}s")
-        except errors.RPCError as e:
-            if sess_id and (_is_frozen(e) or _is_unauthorized_like(e)):
-                await drop_account(sess_id, reason="frozen/unauthorized")
-                return ("error", "REMOVED_FROZEN_OR_DELETED")
-            return ("error", f"RPC_{e.__class__.__name__}")
-        except Exception as e:
-            return ("error", f"EXC_{e.__class__.__name__}")
-        if ok:
-            return ("done", None)
-        return ("error", "PEER_REPORT_REJECTED")
+        return await _peer_report()
 
     mid = await _ensure_reportable_msg_id(cli, peer)
     ids = [mid] if mid else []
     if not ids:
         if next_opt is None:
             return ("choose", _peer_report_options())
-        reason = _peer_reason_from_option(_norm_option(next_opt) or next_opt)
-        try:
-            ok = await cli(
-                functions.account.ReportPeerRequest(
-                    peer=peer,
-                    reason=reason,
-                    message="Violation of Telegram Terms of Service.",
-                )
-            )
-        except errors.FloodWaitError as e:
-            return ("error", f"FLOODWAIT_{e.seconds}s")
-        except errors.RPCError as e:
-            if sess_id and (_is_frozen(e) or _is_unauthorized_like(e)):
-                await drop_account(sess_id, reason="frozen/unauthorized")
-                return ("error", "REMOVED_FROZEN_OR_DELETED")
-            return ("error", f"RPC_{e.__class__.__name__}")
-        except Exception as e:
-            return ("error", f"EXC_{e.__class__.__name__}")
-        if ok:
-            return ("done", None)
-        return ("error", "PEER_REPORT_REJECTED")
+        return await _peer_report()
+    if next_opt is not None and bytes(_norm_option(next_opt) or b"").startswith(b"pr:"):
+        # The menu shown earlier was the reportPeer one; keep using it.
+        return await _peer_report()
     try:
-        if next_opt is None:
-            res = await cli(
-                functions.messages.ReportRequest(
-                    peer=peer, id=ids, option=b"", message=""
-                )
+        res = await cli(
+            functions.messages.ReportRequest(
+                peer=peer, id=ids, option=next_opt or b"", message=""
             )
-        else:
-            res = await cli(
-                functions.messages.ReportRequest(
-                    peer=peer, id=ids, option=next_opt, message=""
-                )
-            )
-    except errors.FloodWaitError as e:
-        return ("error", f"FLOODWAIT_{e.seconds}s")
+        )
     except errors.RPCError as e:
         if sess_id and (_is_frozen(e) or _is_unauthorized_like(e)):
             await drop_account(sess_id, reason="frozen/unauthorized")
             return ("error", "REMOVED_FROZEN_OR_DELETED")
-        return ("error", f"RPC_{e.__class__.__name__}")
+        return (
+            "error",
+            _report_rpc_fail(
+                "messages.report",
+                e,
+                peer=peer,
+                ids=ids,
+                option=next_opt or b"",
+                reason=_reason_code_from_path(path) if path else None,
+                step=len(path or []),
+                sess=sess_id,
+                mode="dialog",
+            ),
+        )
     except Exception as e:
         return ("error", f"EXC_{e.__class__.__name__}")
     if isinstance(res, types.ReportResultChooseOption):
@@ -11806,6 +12824,7 @@ async def on_dialog_choose(event: events.CallbackQuery.Event):
             next_opt=opt,
             sess_id=sess0,
             prefer_peer=(mode == "profile"),
+            path=ctx.get("path") or [],
         )
         if status == "choose":
             _remember_report_options(ctx, payload)
@@ -16246,6 +17265,137 @@ async def ping_all_accounts(event):
     if uid not in ADMIN_IDS:
         return
     await run_account_health_scan(event, uid)
+
+
+async def _dry_check_reason(cli, peer, msg_id: int, code: str, root_options):
+    """Follow Telegram's live report menu for `code` without filing a report.
+
+    Only intermediate (parent) options are sent: Telegram answers those with
+    the next menu. The final option is never sent. Returns
+    (status, [(key, text), ...], options_of_last_level).
+    """
+    spec = _reason_spec(code)
+    options = root_options
+    steps: list = []
+    for level in range(len(spec.levels)):
+        choice = _pick_reason_option(options, code, level)
+        if choice is None:
+            return f"missing@{level}", steps, options
+        steps.append((_option_key(choice), choice.text))
+        if level == len(spec.levels) - 1:
+            return "ok", steps, options
+        try:
+            await _global_report_gate()
+            res = await cli(
+                functions.messages.ReportRequest(
+                    peer=peer, id=[msg_id], option=choice.option, message=""
+                )
+            )
+        except errors.RPCError as e:
+            info = _report_rpc_fail(
+                "messages.report",
+                e,
+                peer=peer,
+                ids=[msg_id],
+                option=choice.option,
+                reason=code,
+                step=level + 1,
+                mode="reportcheck",
+            )
+            return info, steps, options
+        except Exception as e:
+            return f"EXC_{e.__class__.__name__}", steps, options
+        if not isinstance(res, types.ReportResultChooseOption):
+            return f"ended@{level}:{type(res).__name__}", steps, options
+        options = res.options
+    return "ok", steps, options
+
+
+def _reportcheck_peer_line(code: str) -> str:
+    reason, note = _peer_reason_for_code(code)
+    if note == REPORT_API_LIMIT_SCAM:
+        return f"reportPeer: ⚠️ API has no Scam reason → {type(reason).__name__} + scam text"
+    return f"reportPeer: {type(reason).__name__}"
+
+
+@bot.on(events.NewMessage(pattern=r"^/reportcheck(?:@\w+)?(?:\s+(.+))?$"))
+async def report_check_command(event):
+    """Admin: show which Telegram option each reason uses for a real post."""
+    uid = UID(event)
+    if uid not in ADMIN_IDS:
+        return
+    raw = ((event.pattern_match.group(1) if event.pattern_match else "") or "").strip()
+    target, msg_ids = resolve_target_and_msg_ids(raw) if raw else ("", [])
+    msg_ids = _safe_int32_ids(msg_ids or [])
+    if not raw or _parse_target(target)[0] == "unknown" or not msg_ids:
+        await event.respond(
+            "Usage: /reportcheck https://t.me/<channel>/<post_id>\n"
+            "Reads Telegram's report menu for that post with one account and shows the "
+            "option every reason (Scam, Fake, ...) would use. No report is filed."
+        )
+        raise events.StopPropagation
+    pool = await list_session_files(uid)
+    if not pool:
+        await event.respond(txt(uid, "no_session_found"))
+        raise events.StopPropagation
+    sess = await resolve_probe_session(event, uid, pool)
+    if not sess:
+        raise events.StopPropagation
+    cli, fail = await connect_session_client(sess)
+    if not cli:
+        await event.respond(f"❌ account connect failed: {fail}")
+        raise events.StopPropagation
+    msg_id = msg_ids[0]
+    try:
+        peer = await join_group(cli, target, sess, skip_join=True)
+        if not _is_valid_peer(peer):
+            await event.respond(
+                f"❌ cannot open {target} with this account: {_join_fail_reason(peer) or 'JOIN_FAILED'}"
+            )
+            raise events.StopPropagation
+        try:
+            res = await cli(
+                functions.messages.ReportRequest(peer=peer, id=[msg_id], option=b"", message="")
+            )
+        except errors.RPCError as e:
+            info = _report_rpc_fail(
+                "messages.report", e, peer=peer, ids=[msg_id], option=b"", step=0, mode="reportcheck"
+            )
+            await event.respond(f"❌ {target}/{msg_id}: {info}")
+            raise events.StopPropagation
+        if not isinstance(res, types.ReportResultChooseOption):
+            await event.respond(f"⚠️ Telegram returned {type(res).__name__} instead of a menu.")
+            raise events.StopPropagation
+        root = res.options
+        lines = [
+            f"🔎 Report check {target} post {msg_id} (account {sess_phone(sess)})",
+            "Telegram menu: " + ", ".join(f"{_option_key(o)}={o.text}" for o in root),
+            "",
+        ]
+        for code in REPORT_REASON_CODES:
+            status, steps, last_opts = await _dry_check_reason(cli, peer, msg_id, code, root)
+            path_txt = " › ".join(f"{k} «{t}»" for k, t in steps) or "-"
+            label = _reason_label(code)
+            if status == "ok":
+                line = f"✅ {label}: messages.report {path_txt}"
+                if code == "scam":
+                    subs = _reason_sub_options(last_opts, "scam")
+                    line += " | scam options: " + ", ".join(
+                        f"{_option_key(o)} «{o.text}»" for o in subs
+                    )
+            elif status.startswith("missing@"):
+                line = f"❌ {label}: Telegram did not offer this option (level {status[8:]}, after: {path_txt})"
+            else:
+                line = f"❌ {label}: {status} (after: {path_txt})"
+            lines.append(line)
+            lines.append(f"    {_reportcheck_peer_line(code)}")
+            logger.info("reportcheck target=%s msg=%s code=%s status=%s path=%s", target, msg_id, code, status, steps)
+        text = "\n".join(lines)
+        for i in range(0, len(text), 3900):
+            await event.respond(text[i : i + 3900], link_preview=False)
+    finally:
+        await _safe_disconnect(cli)
+    raise events.StopPropagation
 
 async def send_expiry_reminders():
     today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
