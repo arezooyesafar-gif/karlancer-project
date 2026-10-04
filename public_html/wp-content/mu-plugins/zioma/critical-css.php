@@ -59,6 +59,18 @@ add_action(
 
 		// The CSS is author-controlled (performance-config.php), not user input.
 		echo "\n<style id=\"zioma-critical\">" . $css . "</style>\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+
+		// Rules scoped to html.zioma-modal-wait apply only while the page is still
+		// loading: the class is set here, before the first paint, and removed when
+		// the page has loaded, or on the visitor's first touch, click or key press
+		// once the HTML is parsed (capture phase, so before any theme handler can
+		// open a modal). A press while the HTML is still arriving is ignored: the
+		// theme's modal script only sets modals up at DOMContentLoaded, so none can
+		// open before then, and dropping the class early would let the closed
+		// modals back into the page flow.
+		if ( false !== strpos( $css, 'zioma-modal-wait' ) ) {
+			echo '<script data-no-optimize="1" data-no-defer="1" data-cfasync="false">(function(){var d=document.documentElement,e=["pointerdown","touchstart","mousedown","keydown"];d.classList.add("zioma-modal-wait");function off(v){if(v&&"load"!==v.type&&"loading"===document.readyState){return;}d.classList.remove("zioma-modal-wait");e.forEach(function(n){removeEventListener(n,off,true);});removeEventListener("load",off);}e.forEach(function(n){addEventListener(n,off,true);});addEventListener("load",off);})();</script>' . "\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		}
 	},
 	1
 );

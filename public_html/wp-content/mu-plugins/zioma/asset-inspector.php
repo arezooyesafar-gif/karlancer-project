@@ -640,6 +640,35 @@ add_action(
 				window.IntersectionObserver = Observer;
 			}
 
+			// Timer callbacks that run 50 ms or longer, with the start of their code:
+			// long frames from inline scripts only say "setTimeout @ page", so this
+			// names the code behind them.
+			var slowTimers = log.slowTimers = [];
+			['setTimeout', 'setInterval'].forEach(function (name) {
+				var native = window[name];
+				if ('function' !== typeof native) {
+					return;
+				}
+				window[name] = function (callback) {
+					if ('function' !== typeof callback) {
+						return native.apply(window, arguments);
+					}
+					var args = Array.prototype.slice.call(arguments);
+					args[0] = function () {
+						var start = performance.now();
+						try {
+							return callback.apply(this, arguments);
+						} finally {
+							var spent = performance.now() - start;
+							if (spent >= 50 && slowTimers.length < 200) {
+								slowTimers.push({ t: Math.round(start), ms: Math.round(spent), kind: name, code: String(callback).replace(/\s+/g, ' ').slice(0, 220) });
+							}
+						}
+					};
+					return native.apply(window, args);
+				};
+			});
+
 			// Page timings, layout shifts, long frames and element size changes, for
 			// finding what moves the page (CLS) and what keeps the main thread busy (TBT).
 			var perf = log.perf = { shifts: [], frames: [], resizes: [], fcp: null, lcp: null };
@@ -757,6 +786,9 @@ add_action(
 					lines.push(shift.t + ' ms\t' + shift.value.toFixed(3) + (shift.input ? ' (after input, not counted)' : '') + '\t' + shift.sources.filter(function (s) { return !inPanel(s.el); }).map(function (s) {
 						return describe(s.el) + ' y ' + Math.round(s.from.y) + '->' + Math.round(s.to.y) + ' h ' + Math.round(s.from.height) + '->' + Math.round(s.to.height);
 					}).join(' | '));
+					if (shift.value < 0.001) {
+						return;
+					}
 					var near = perf.resizes.filter(function (r) {
 						return r.t >= shift.t - 1000 && r.t <= shift.t + 250 && !inPanel(r.el);
 					});
@@ -796,19 +828,22 @@ add_action(
 				}).sort(function (x, y) {
 					return y.value - x.value;
 				}).slice(0, 3).forEach(function (shift) {
-					var moved = null, distance = -1;
+					// Prefer elements visible both before and after: one that entered or
+					// left the screen has a clipped rectangle, not a real distance.
+					var moved = null, distance = -1, seen = false;
 					shift.sources.forEach(function (s) {
-						var d = Math.abs(s.to.y - s.from.y);
-						if (s.el && 1 === s.el.nodeType && s.el.isConnected && !inPanel(s.el) && d > distance) {
+						var d = Math.abs(s.to.y - s.from.y), both = s.from.height > 0 && s.to.height > 0;
+						if (s.el && 1 === s.el.nodeType && s.el.isConnected && !inPanel(s.el) && ((both && !seen) || (both === seen && d > distance))) {
 							moved = s.el;
 							distance = d;
+							seen = seen || both;
 						}
 					});
 					if (!moved) {
 						return;
 					}
 					lines.push('', 'STRUCTURE above ' + describe(moved) + ' (moved ' + Math.round(distance) + ' px at ' + shift.t + ' ms, score ' + shift.value.toFixed(3) + '; each ancestor, then the elements before it: first seen height -> now, top now, * = changed)');
-					var chain = [];
+					var chain = [], changed = [];
 					for (var el = moved; el && el !== document.body; el = el.parentElement) {
 						chain.unshift(el);
 					}
@@ -820,10 +855,55 @@ add_action(
 							}
 						}
 						var pad = new Array(level + 1).join('  ');
-						before.forEach(function (sib) { lines.push(row(sib, pad + '  before: ')); });
+						before.forEach(function (sib) {
+							var line = row(sib, pad + '  before: ');
+							if (/before: \* /.test(line)) {
+								changed.push(sib);
+							}
+							lines.push(line);
+						});
 						lines.push(row(el, pad));
 					});
+					// Inside the changed blocks nearest to it: widgets, images and
+					// whatever changed height, so the widget behind the shift is named.
+					changed.slice(-2).forEach(function (block) {
+						lines.push('  inside ' + own(block) + ':');
+						var count = 0;
+						(function walk(node, depth) {
+							Array.prototype.forEach.call(node.children, function (child) {
+								if (count >= 20 || depth > 7 || /^(SCRIPT|STYLE|LINK|TEMPLATE|NOSCRIPT|svg|SVG|PATH)$/.test(child.tagName)) {
+									return;
+								}
+								var now = Math.round(child.getBoundingClientRect().height), was = first.has(child) ? first.get(child) : now;
+								var media = /^(IMG|PICTURE|IFRAME|VIDEO)$/.test(child.tagName);
+								if (child.hasAttribute('data-widget_type') || media || Math.abs(now - was) >= 8) {
+									count++;
+									var extra = '';
+									if ('IMG' === child.tagName) {
+										extra = ' | img ' + (child.getAttribute('width') || '-') + 'x' + (child.getAttribute('height') || '-') + ' attrs, natural ' + child.naturalWidth + 'x' + child.naturalHeight + ', shown ' + Math.round(child.getBoundingClientRect().width) + 'x' + now + ', loading=' + (child.getAttribute('loading') || '-') + (child.getAttribute('data-src') ? ', data-src' : '') + ' ' + short(child.currentSrc || child.src || '').slice(-60);
+									}
+									lines.push(row(child, new Array(depth + 2).join('  ')) + extra);
+								}
+								walk(child, depth + 1);
+							});
+						})(block, 1);
+					});
 				});
+
+				if (slowTimers.length) {
+					var timers = {};
+					slowTimers.forEach(function (x) {
+						var key = x.kind + x.code;
+						timers[key] = timers[key] || { kind: x.kind, code: x.code, runs: 0, total: 0, max: 0, first: x.t };
+						timers[key].runs++;
+						timers[key].total += x.ms;
+						timers[key].max = Math.max(timers[key].max, x.ms);
+					});
+					lines.push('', 'SLOW TIMER CALLBACKS (50 ms or more; runs, total, longest, first start, code)');
+					Object.keys(timers).map(function (k) { return timers[k]; }).sort(function (x, y) { return y.total - x.total; }).slice(0, 12).forEach(function (x) {
+						lines.push(x.kind + '\t' + x.runs + 'x\t' + x.total + ' ms\tmax ' + x.max + ' ms\tfrom ' + x.first + ' ms\t' + x.code);
+					});
+				}
 
 				var blocking = perf.frames.reduce(function (sum, f) { return sum + (f.blocking || 0); }, 0);
 				lines.push('', 'LONG FRAMES over 50 ms (' + perf.frames.length + ', blocking ' + blocking + ' ms; start, length, blocking, scripts, render, style+layout, longest scripts)');

@@ -77,7 +77,9 @@ return array(
 	// image ratio Swiper will give it before Swiper starts, so the slider does
 	// not shrink 180 px on start and push the home page up (see slider-pin.php).
 	// Mobile breakpoint only. 'off', 'trial' (only with ?zioma_trial=1) or 'on'.
-	'slider_pin'            => 'trial',
+	// Now 'on': on ?zioma_trial=1 the 180 px jump was gone (slider container
+	// 296 px from first paint) and the slider looked and worked the same.
+	'slider_pin'            => 'on',
 
 	// Inline critical CSS (see critical-css.php) that pins layout-shifting
 	// elements to the state the theme's own scripts settle them into, so the
@@ -182,7 +184,19 @@ return array(
 	// Rules still being verified: printed only on ?zioma_trial=1, whatever the
 	// 'critical_css' switch is, so they can be checked on the live site without
 	// affecting ordinary visitors, then moved into 'critical_css_rules' above.
-	'critical_css_trial_rules' => array(),
+	'critical_css_trial_rules' => array(
+		// The theme's closed modals (.prk-modal: product info and specs, gallery
+		// popup, review forms, search, login, variable add-to-cart) sit in the
+		// page flow at full height until prk-modal.js hides them at
+		// DOMContentLoaded: ~4,400 px on a product page, which then collapses
+		// under a reader who has started scrolling (a 1.0 shift in a Pixel 9
+		// report). The plain 'all' rule above loses to a stronger theme rule
+		// there. This one hides every closed modal only while the page loads
+		// (html.zioma-modal-wait, removed on the first touch, click or key press,
+		// before any theme handler runs, or at load; see critical-css.php), so
+		// opening and closing modals is left entirely to the theme.
+		'all' => 'html.zioma-modal-wait body .prk-modal.prk-modal:not(.show){display:none!important}',
+	),
 
 	// Same keys as WordPress's wp_preload_resources filter, plus an optional
 	// 'context'. The two text fonts every page uses, so they download next to
