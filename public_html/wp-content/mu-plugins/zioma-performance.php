@@ -20,4 +20,5 @@ require_once __DIR__ . '/zioma/archive-count-fix.php';
 require_once __DIR__ . '/zioma/archive-infinite.php';
 require_once __DIR__ . '/zioma/delay-scripts.php';
 require_once __DIR__ . '/zioma/slider-hold.php';
+require_once __DIR__ . '/zioma/slider-pin.php';
 require_once __DIR__ . '/zioma/asset-inspector.php';

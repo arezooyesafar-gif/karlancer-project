@@ -32,7 +32,7 @@ function zioma_delay_rewrite( $html, $patterns, $timeout ) {
 		$html
 	);
 
-	if ( ! $count || false === stripos( $html, '</body>' ) ) {
+	if ( ! $count ) {
 		return $html;
 	}
 
@@ -47,7 +47,12 @@ function zioma_delay_rewrite( $html, $patterns, $timeout ) {
 		. 'setTimeout(load,' . ( (int) $timeout * 1000 ) . ');'
 		. '})();</script>';
 
+	// Before </body>, or at the end when another plugin closed this buffer
+	// early (before </body> was printed) and the rest of the page follows it.
 	$pos = strripos( $html, '</body>' );
+	if ( false === $pos ) {
+		return $html . $loader;
+	}
 
 	return substr( $html, 0, $pos ) . $loader . substr( $html, $pos );
 }

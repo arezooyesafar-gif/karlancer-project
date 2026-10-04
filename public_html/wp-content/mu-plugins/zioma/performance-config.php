@@ -73,6 +73,12 @@ return array(
 	'slider_hold_contexts'  => array( 'front_page' ),
 	'slider_hold_timeout'   => 10,
 
+	// The theme's mobile image slider gets the slide width, gap, centring and
+	// image ratio Swiper will give it before Swiper starts, so the slider does
+	// not shrink 180 px on start and push the home page up (see slider-pin.php).
+	// Mobile breakpoint only. 'off', 'trial' (only with ?zioma_trial=1) or 'on'.
+	'slider_pin'            => 'trial',
+
 	// Inline critical CSS (see critical-css.php) that pins layout-shifting
 	// elements to the state the theme's own scripts settle them into, so the
 	// page looks identical from the first paint with no cumulative layout
@@ -94,9 +100,10 @@ return array(
 	'archive_loadmore_fix'  => 'on',
 
 	// Product categories load more products on scroll with the theme's own
-	// Archive V4 scroll mode (its setting 'archive_v4_load_more_mode' is read
-	// as 'scroll' instead of 'button'; see archive-infinite.php), so the theme's
-	// own button, Ajax, filters and sorting do the work. 'off', 'trial' or 'on'.
+	// Archive V4 load-more in scroll mode instead of page numbers (its settings
+	// 'archive_v4_load_more_enable' and 'archive_v4_load_more_mode' are read as
+	// on / 'scroll'; see archive-infinite.php), so the theme's own Ajax, filters
+	// and sorting do the work. 'off', 'trial' or 'on'. Confirmed live 4 Oct 2026.
 	'archive_infinite'      => 'on',
 
 	// 'context' => array( 'style-handle', ... )
