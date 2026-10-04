@@ -4,6 +4,7 @@
 !/CLAUDE.md
 !/reports/
 !/db/
+!/report-bot/
 
 !/public_html/
 /public_html/*
@@ -25,3 +26,10 @@
 *.csv
 *.log
 .env
+
+# report-bot: never commit live credentials or Telegram sessions
+/report-bot/config.py
+/report-bot/*.session
+/report-bot/*.session-journal
+/report-bot/__pycache__/
+/report-bot/**/__pycache__/
