@@ -1,11 +1,3 @@
-"""Report reasons: each reason is sent through its own Telegram route.
-
-Runs the real bot module (main-v6.py) against tests/mocktg.FakeTelegram and
-checks the exact requests that reach "Telegram".
-
-    pip install -r requirements.txt -r tests/requirements-test.txt
-    python -m pytest tests -q
-"""
 import asyncio
 import logging
 import os
@@ -20,12 +12,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BOT_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
-import mocktg  # noqa: E402
+import mocktg
 
 UID = 4242
 SESS = "sess1"
 
-# Expected messages.report option path per reason (keys as Telegram sends them).
 EXPECTED_PATH = {
     "spam": ["9", "92"],
     "violence": ["3", "32"],
@@ -38,7 +29,6 @@ EXPECTED_PATH = {
     "copyright": ["8"],
     "other": ["a", "a2"],
 }
-# account.reportPeer constructor per reason. Scam has none in the API.
 EXPECTED_PEER_REASON = {
     "spam": "InputReportReasonSpam",
     "violence": "InputReportReasonViolence",
@@ -51,7 +41,6 @@ EXPECTED_PEER_REASON = {
     "copyright": "InputReportReasonCopyright",
     "other": "InputReportReasonOther",
 }
-# Expected reason code for every leaf of Telegram's menu.
 LEAF_CODE = {
     "1": "other", "21": "child", "22": "child",
     **{k: "violence" for k in ("31", "32", "33", "34", "35", "36", "37", "38")},
@@ -74,7 +63,6 @@ def bot():
 
 @pytest.fixture(scope="session")
 def run(bot):
-    # One loop for the whole run: the bot's Redis client binds to it.
     loop = asyncio.new_event_loop()
     yield loop.run_until_complete
     loop.close()
@@ -127,7 +115,6 @@ def path_keys(path):
 
 
 def walks(server):
-    """Split messages.report calls into walks (each starts with option b'')."""
     out = []
     for c in server.calls:
         if c[0] != "messages.report":
@@ -145,9 +132,6 @@ def peer_calls(server):
 MODE_FOR = {"scam": "scam", "fake": "fake"}
 
 
-# --------------------------------------------------------------------------
-# API facts
-# --------------------------------------------------------------------------
 
 def test_telegram_api_has_no_scam_report_reason():
     names = {n for n in dir(types) if n.startswith("InputReportReason")}
@@ -175,9 +159,6 @@ def test_scam_and_fake_have_distinct_specs(bot):
     assert type(bot._peer_reason_for_code("fake")[0]).__name__ == "InputReportReasonFake"
 
 
-# --------------------------------------------------------------------------
-# One route per reason: probe walk + worker run against the fake Telegram
-# --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("code", sorted(EXPECTED_PATH))
 def test_reason_route_end_to_end(bot, run, code):
@@ -296,9 +277,6 @@ def test_missing_telegram_option_is_an_error_not_a_substitute(bot, run, code, tr
 
 @pytest.mark.parametrize("lang", ["en", "fa", "ar"])
 def test_matching_uses_meaning_not_option_bytes(bot, run, lang):
-    """Telegram localises the menu and its option bytes are opaque: shuffle
-    the bytes and translate the texts, every reason must still land on the
-    same menu entries."""
     keys = sorted({k for _t, kids in mocktg.TREE.values() for k, _x in kids})
     key_map = {k: f"x{i}" for i, k in enumerate(keys)}
     tree = (
@@ -330,9 +308,6 @@ def test_matching_uses_meaning_not_option_bytes(bot, run, lang):
             assert got == expected, (lang, code, got)
 
 
-# --------------------------------------------------------------------------
-# Reason classification of a recorded path (used for account.reportPeer)
-# --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("variant", ["en", "fa", "ar", "keys_only", "text_only"])
 def test_every_telegram_leaf_maps_to_the_right_reason(bot, variant):
@@ -386,8 +361,6 @@ def test_profile_report_sends_registered_reason(bot, run, code):
 
 
 def test_dialog_peer_reason_path_is_not_walked_as_a_menu(bot, run):
-    """Probe had no message (pr: menu) but the worker finds one: it must still
-    send account.reportPeer, not fail with PATH_MISMATCH."""
     server = mocktg.FakeTelegram()
     mocktg.wire(bot, server)
     ctx = base_ctx("dialog", msg_ids=[])
@@ -420,9 +393,6 @@ def test_story_report_uses_the_same_reason_path(bot, run):
     assert sent == [b"", b"7", b"73", b"73"]
 
 
-# --------------------------------------------------------------------------
-# Wizard handlers (callback buttons) end to end
-# --------------------------------------------------------------------------
 
 class FakeMsg:
     def __init__(self, sink):
@@ -497,7 +467,6 @@ def test_scam_wizard_end_to_end(bot, run, monkeypatch):
     offered = [bot._decode_opt_callback(d, "mr:") for d in _buttons_data(ev) if d != b"mr:cancel"]
     assert sorted(offered) == [b"72", b"73", b"74"]
 
-    # A forged / stale "Impersonation" button is refused in Scam mode.
     forged = FakeEvent(bot._encode_opt_callback("mr:", b"71"))
     server.calls.clear()
     run(bot.on_menu_choose(forged))
@@ -532,9 +501,6 @@ def test_fake_wizard_end_to_end(bot, run, monkeypatch):
     assert pcs and all(c[2] == "InputReportReasonFake" for c in pcs)
 
 
-# --------------------------------------------------------------------------
-# Error reporting
-# --------------------------------------------------------------------------
 
 class _Capture(logging.Handler):
     def __init__(self):
@@ -583,7 +549,6 @@ def test_report_errors_are_named_and_logged(bot, run, logs, server_kw, ctx_kw, p
     assert hit, logs
     assert "method=messages.report" in hit[0] and "reason=scam" in hit[0]
 
-    # The probe account gets the same named error (it used to say JOIN_FAILED).
     run(bot.ctx_set(UID, ctx))
     status, payload = run(bot.sample_step(UID, ctx))
     assert (status, payload) == ("error", expect)
@@ -611,9 +576,6 @@ def test_wizard_error_texts(bot):
     assert "SOMETHING_NEW" in bot._format_wizard_error(UID, "RPC_ERROR:SOMETHING_NEW:400")
 
 
-# --------------------------------------------------------------------------
-# Menus, permissions, translations, AI
-# --------------------------------------------------------------------------
 
 def test_menu_has_separate_scam_and_fake_buttons(bot):
     for lang in ("fa", "ar", "en"):
@@ -684,9 +646,6 @@ def test_ai_reasons_keep_their_own_route(bot, run, monkeypatch):
     assert bot._AI_MODE_FOR_REASON == {"scam": "scam", "fake": "fake"}
 
 
-# --------------------------------------------------------------------------
-# /reportcheck: live menu check that never files a report
-# --------------------------------------------------------------------------
 
 class _Match:
     def __init__(self, arg):
@@ -715,7 +674,6 @@ def test_reportcheck_reads_menu_without_reporting(bot, run, monkeypatch, drop_sc
         run(bot.report_check_command(ev))
     text = "\n".join(a[0] for kind, a, kw in ev.out if kind == "respond" and a)
     sent = {c[3] for c in server.calls if c[0] == "messages.report"}
-    # Only the root menu and parent entries are requested; never a final option.
     leaves = {k.encode() for k in mocktg.LEAVES}
     assert not (sent & leaves), sent
     assert all(c[4] == "" for c in server.calls if c[0] == "messages.report")

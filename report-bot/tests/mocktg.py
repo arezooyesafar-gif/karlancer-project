@@ -1,9 +1,3 @@
-"""Offline stand-ins for Mongo, Redis and Telegram.
-
-The bot module is imported unchanged; only its Telegram/DB entry points are
-replaced, so the real report code runs against a fake Telegram server that
-implements messages.report, stories.report and account.reportPeer the way
-layer 229 does (menu options, OPTION_INVALID, MESSAGE_ID_INVALID, ...)."""
 import importlib.util
 import os
 import shutil
@@ -13,9 +7,6 @@ import tempfile
 from telethon import errors
 from telethon.tl import functions, types
 
-# Telegram's messages.report / stories.report option tree. Option bytes are the
-# ones the bot already stores in report_options_translations.json; English
-# texts are what Telegram returns to an English-language account.
 TREE = {
     "": ("Report", [
         ("1", "I don't like it"),
@@ -121,9 +112,6 @@ VALID_MSG_IDS = {10, 11, 12}
 
 
 def translated_tree(lang: str, translations: dict, *, key_map=None):
-    """TREE with texts in `lang` (fa/ar) and, optionally, different option
-    bytes, to check that matching does not depend on one language or on the
-    observed keys."""
     key_map = key_map or {}
 
     def k(x):
@@ -139,7 +127,6 @@ def translated_tree(lang: str, translations: dict, *, key_map=None):
 
 
 class FakeTelegram:
-    """Behaves like the Telegram server for the report methods only."""
 
     def __init__(self, *, tree=None, valid_ids=None, peer_report_errors=None, reject_options=()):
         self.tree = tree or TREE
@@ -239,7 +226,6 @@ class FakeUserClient:
 
 
 def load_bot(src_dir: str, main_file: str = "main-v6.py", mod_name: str = "botmain"):
-    """Import the bot module with Mongo/Redis/Telegram replaced by fakes."""
     import mongomock
     import pymongo
     import redis.asyncio as redis_asyncio
@@ -285,7 +271,6 @@ def load_bot(src_dir: str, main_file: str = "main-v6.py", mod_name: str = "botma
 
 
 def wire(mod, server: FakeTelegram, *, peer=CHANNEL, history_ids=(10,)):
-    """Point the bot's session/peer helpers at the fake server."""
     cli = FakeUserClient(server, history_ids=history_ids)
 
     async def connect_session_client(session_id):

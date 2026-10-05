@@ -1,9 +1,3 @@
-"""Print, per report reason, what the bot sends to Telegram and the result.
-
-Runs the real bot code against tests/mocktg.FakeTelegram (offline).
-
-    python tests/reason_matrix.py
-"""
 import asyncio
 import logging
 import os
@@ -12,8 +6,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import mocktg  # noqa: E402
-from telethon import errors  # noqa: E402
+import mocktg
+from telethon import errors
 
 BOT_DIR = os.path.dirname(HERE)
 UID = 4242

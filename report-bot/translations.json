@@ -2279,19 +2279,19 @@
     "en": "⛔️[5260293700088511294]️ Your access to this section is disabled."
   },
   "join_prompt_bot": {
-      "fa": "آیا ربات در اکانت‌ها استارت شده است؟",
-      "ar": "هل تم تشغيل البوت في الحسابات؟",
-      "en": "Has the bot been started in the accounts?"
+    "fa": "آیا ربات در اکانت‌ها استارت شده است؟",
+    "ar": "هل تم تشغيل البوت في الحسابات؟",
+    "en": "Has the bot been started in the accounts?"
   },
   "choice_bot_yes": {
-      "fa": "بله (نیازی به استارت مجدد نیست)",
-      "ar": "نعم (لا داعي لإعادة التشغيل)",
-      "en": "Yes (No need to restart)"
+    "fa": "بله (نیازی به استارت مجدد نیست)",
+    "ar": "نعم (لا داعي لإعادة التشغيل)",
+    "en": "Yes (No need to restart)"
   },
   "choice_bot_no": {
-      "fa": "خیر (ابتدا در اکانت‌ها استارت شود)",
-      "ar": "لا (قم بتشغيله في الحسابات أولاً)",
-      "en": "No (Start in accounts first)"
+    "fa": "خیر (ابتدا در اکانت‌ها استارت شود)",
+    "ar": "لا (قم بتشغيله في الحسابات أولاً)",
+    "en": "No (Start in accounts first)"
   },
   "add_via_phone_btn": {
     "fa": "📱 با شماره تلفن",
@@ -2599,9 +2599,9 @@
     "en": "Models ({page}/{pages})"
   },
   "ai_models_fail": {
-    "fa": "❌ models",
-    "ar": "❌ models",
-    "en": "❌ models"
+    "fa": "❌ دریافت لیست مدل‌ها ناموفق بود:\n{error}",
+    "ar": "❌ فشل جلب قائمة النماذج:\n{error}",
+    "en": "❌ Could not load the model list:\n{error}"
   },
   "ai_no_key": {
     "fa": "❌ API Key",
@@ -3107,5 +3107,125 @@
     "fa": "❌ خطای تلگرام هنگام ریپورت: {error}",
     "ar": "❌ خطأ تيليجرام أثناء البلاغ: {error}",
     "en": "❌ Telegram error while reporting: {error}"
+  },
+  "accounts_all_busy": {
+    "fa": "⏳ همهٔ {busy} اکانت الان داخل ریپورت در حال اجرا هستند و تا پایان آن آزاد نمی‌شوند.\nاز «🛑 مدیریت گزارش» ریپورت را متوقف کن یا صبر کن تمام شود، بعد دوباره امتحان کن.",
+    "ar": "⏳ جميع الحسابات ({busy}) تعمل الآن في بلاغ جارٍ ولن تتحرر حتى ينتهي.\nأوقف البلاغ من «🛑 إدارة البلاغ» أو انتظر حتى ينتهي ثم حاول مجدداً.",
+    "en": "⏳ All {busy} accounts are busy in a running report and stay locked until it ends.\nStop it from “🛑 Manage Report” or wait for it to finish, then try again."
+  },
+  "accounts_busy_note": {
+    "fa": "⏳ {busy} اکانت دیگر داخل ریپورت در حال اجرا هستند و تا پایان آن استفاده نمی‌شوند.",
+    "ar": "⏳ {busy} حسابات أخرى تعمل في بلاغ جارٍ ولن تُستخدم حتى ينتهي.",
+    "en": "⏳ {busy} more accounts are busy in a running report and are not used until it ends."
+  },
+  "account_list_count": {
+    "fa": "👥 تعداد کل: {total} | ⏳ در حال ریپورت: {busy}",
+    "ar": "👥 الإجمالي: {total} | ⏳ قيد البلاغ: {busy}",
+    "en": "👥 Total: {total} | ⏳ In a running report: {busy}"
+  },
+  "probe_failed_detail": {
+    "fa": "اکانت‌های بررسی‌شده: {tried}\nعلت: {reasons}",
+    "ar": "الحسابات التي تم فحصها: {tried}\nالسبب: {reasons}",
+    "en": "Accounts checked: {tried}\nReason: {reasons}"
+  },
+  "probe_hint_unauthorized": {
+    "fa": "🔐 NOT_AUTHORIZED یعنی سشن این اکانت دیگر در تلگرام معتبر نیست (از دستگاه‌ها خارج شده یا اکانت حذف شده). این اکانت را دوباره اضافه کن یا ادمین با «🩺 بررسی سلامت اکانت‌ها» حذفش کند.",
+    "ar": "🔐 NOT_AUTHORIZED تعني أن جلسة هذا الحساب لم تعد صالحة في تيليجرام (تم تسجيل الخروج أو حُذف الحساب). أضف الحساب من جديد أو يحذفه الأدمن عبر «🩺 فحص صحة الحسابات».",
+    "en": "🔐 NOT_AUTHORIZED means this account's session is no longer valid on Telegram (logged out or deleted). Add the account again or let the admin remove it with “🩺 Account health check”."
+  },
+  "join_check_misconfig": {
+    "fa": "⚠️ ربات نمی‌تواند عضویت کاربران را در کانال {channel} بررسی کند ({error}).\nربات را ادمین همان کانال کن (با دسترسی «دعوت کاربران»). تا وقتی درست نشده، کاربران بدون بررسی عضویت رد می‌شوند تا ربات قفل نشود.",
+    "ar": "⚠️ لا يستطيع البوت التحقق من عضوية المستخدمين في القناة {channel} ({error}).\nاجعل البوت أدمن في القناة (مع صلاحية «دعوة المستخدمين»). حتى يتم الإصلاح يمر المستخدمون دون تحقق كي لا يتوقف البوت.",
+    "en": "⚠️ The bot cannot check user membership in {channel} ({error}).\nMake the bot an admin of that channel (with “Invite users”). Until then users pass without the membership check so the bot is not blocked."
+  },
+  "report_channel_default_label": {
+    "fa": "کانال گزارش",
+    "ar": "قناة البلاغ",
+    "en": "report channel"
+  },
+  "report_join_no_link": {
+    "fa": "⚠️ لینک عضویت این کانال الان در دسترس نیست. به پشتیبانی پیام بده.",
+    "ar": "⚠️ رابط الانضمام لهذه القناة غير متاح الآن. راسل الدعم.",
+    "en": "⚠️ The join link for this channel is not available right now. Contact support."
+  },
+  "report_join_still_missing": {
+    "fa": "⛔ هنوز عضو کانال نشدی. اول با دکمهٔ «عضویت در کانال» عضو شو، بعد «عضو شدم» را بزن.",
+    "ar": "⛔ لم تنضم إلى القناة بعد. انضم أولاً عبر زر «الانضمام للقناة» ثم اضغط «انضممت».",
+    "en": "⛔ You have not joined yet. Join with the “Join channel” button first, then tap “I joined”."
+  },
+  "report_notify_join_link": {
+    "fa": "🔗 لینک عضویتی که به کاربران نشان داده می‌شود:\n{url}",
+    "ar": "🔗 رابط الانضمام الذي يظهر للمستخدمين:\n{url}",
+    "en": "🔗 Join link shown to users:\n{url}"
+  },
+  "report_notify_no_link": {
+    "fa": "⚠️ برای کانال {channel} لینک عضویت ساخته نشد.\nربات را ادمین کانال کن (با دسترسی «دعوت کاربران از طریق لینک») یا کانال را با @یوزرنیم یا لینک دعوت ثبت کن؛ وگرنه کاربران دکمهٔ عضویت نمی‌بینند.",
+    "ar": "⚠️ لم يتم إنشاء رابط انضمام للقناة {channel}.\nاجعل البوت أدمن (مع صلاحية «دعوة المستخدمين عبر رابط») أو سجّل القناة بـ @اسم المستخدم أو رابط دعوة، وإلا لن يرى المستخدمون زر الانضمام.",
+    "en": "⚠️ No join link could be created for {channel}.\nMake the bot a channel admin (with “Invite users via link”) or set the channel by @username or invite link, otherwise users get no join button."
+  },
+  "conv_busy": {
+    "fa": "⏳ یک مرحلهٔ قبلی هنوز منتظر جواب توست. اول جوابش را بفرست یا «انصراف» را بزن، بعد دوباره امتحان کن.",
+    "ar": "⏳ ما زالت خطوة سابقة تنتظر ردك. أرسل الرد أو اضغط «إلغاء» ثم حاول مجدداً.",
+    "en": "⏳ A previous step is still waiting for your answer. Reply to it or tap “Cancel”, then try again."
+  },
+  "restart_done": {
+    "fa": "✅ ربات با موفقیت ری‌استارت شد.",
+    "ar": "✅ تمت إعادة تشغيل البوت بنجاح.",
+    "en": "✅ The bot restarted successfully."
+  },
+  "ai_err_401": {
+    "fa": "🔑 کلید API نامعتبر یا باطل شده است. از «تنظیمات هوش مصنوعی» کلید درست را ثبت کن.",
+    "ar": "🔑 مفتاح API غير صالح أو ملغى. سجّل المفتاح الصحيح من إعدادات الذكاء الاصطناعي.",
+    "en": "🔑 The API key is invalid or revoked. Set a valid key in AI settings."
+  },
+  "ai_err_403": {
+    "fa": "⛔ سرویس AI دسترسی این کلید/مدل را رد کرد (403). دسترسی پروژه و مدل را در پنل سرویس بررسی کن.",
+    "ar": "⛔ رفضت خدمة الذكاء الاصطناعي صلاحية هذا المفتاح/النموذج (403). تحقّق من صلاحيات المشروع والنموذج.",
+    "en": "⛔ The AI service refused this key/model (403). Check the project and model permissions."
+  },
+  "ai_err_region": {
+    "fa": "🌍 سرویس AI از کشور/منطقهٔ IP سرور پشتیبانی نمی‌کند (403). سرور را خارج از ایران ببر یا در «تنظیمات هوش مصنوعی» یک Base URL واسط (OpenAI-compatible) ثبت کن.",
+    "ar": "🌍 لا تدعم خدمة الذكاء الاصطناعي بلد/منطقة IP الخادم (403). انقل الخادم أو سجّل Base URL وسيطاً متوافقاً مع OpenAI.",
+    "en": "🌍 The AI service does not support the server's country/region (403). Move the server or set an OpenAI-compatible relay Base URL in AI settings."
+  },
+  "ai_err_404": {
+    "fa": "🔎 مدل یا آدرس API پیدا نشد (404). از «تنظیمات هوش مصنوعی» مدل را از لیست مدل‌ها انتخاب کن و Base URL را چک کن.",
+    "ar": "🔎 لم يتم العثور على النموذج أو عنوان API (404). اختر النموذج من القائمة وتحقّق من Base URL.",
+    "en": "🔎 Model or API URL not found (404). Pick a model from the list in AI settings and check the Base URL."
+  },
+  "ai_err_quota": {
+    "fa": "💳 اعتبار حساب سرویس AI تمام شده (insufficient_quota). حساب را شارژ کن یا کلید دیگری ثبت کن.",
+    "ar": "💳 نفد رصيد حساب خدمة الذكاء الاصطناعي (insufficient_quota). اشحن الحساب أو استخدم مفتاحاً آخر.",
+    "en": "💳 The AI account is out of credit (insufficient_quota). Top it up or use another key."
+  },
+  "ai_err_429": {
+    "fa": "⏳ محدودیت تعداد درخواست سرویس AI (429). چند دقیقه بعد دوباره امتحان کن.",
+    "ar": "⏳ تم بلوغ حد الطلبات لخدمة الذكاء الاصطناعي (429). حاول بعد دقائق.",
+    "en": "⏳ AI rate limit reached (429). Try again in a few minutes."
+  },
+  "ai_err_5xx": {
+    "fa": "🛠 سرور سرویس AI موقتاً خطا داد. کمی بعد دوباره امتحان کن.",
+    "ar": "🛠 خادم خدمة الذكاء الاصطناعي أعاد خطأ مؤقتاً. حاول لاحقاً.",
+    "en": "🛠 The AI server returned a temporary error. Try again later."
+  },
+  "ai_err_network": {
+    "fa": "🌐 اتصال سرور ربات به سرویس AI برقرار نشد. اینترنت/فیلترینگ سرور یا Base URL را بررسی کن.",
+    "ar": "🌐 تعذّر اتصال خادم البوت بخدمة الذكاء الاصطناعي. تحقّق من الشبكة أو Base URL.",
+    "en": "🌐 The bot server could not reach the AI service. Check the server network or the Base URL."
+  },
+  "ai_analyze_other_reasons": {
+    "fa": "ℹ️ فقط پست‌های «{reason}» با دلیل خودشان ریپورت می‌شوند. پست‌های دلایل دیگر ({others}) با این دلیل ارسال نمی‌شوند؛ برای آن‌ها ریپورت جدا بزن.",
+    "ar": "ℹ️ يتم الإبلاغ فقط عن منشورات «{reason}» بسببها الصحيح. منشورات الأسباب الأخرى ({others}) لا تُرسل بهذا السبب؛ أبلغ عنها بشكل منفصل.",
+    "en": "ℹ️ Only “{reason}” posts are reported, with their own reason. Posts with other reasons ({others}) are not sent with this reason; report them separately."
+  },
+  "acc_health_busy_line": {
+    "fa": "⏳ در حال ریپورت (برای جلوگیری از خراب شدن سشن بررسی نشد): {busy}",
+    "ar": "⏳ قيد البلاغ (لم تُفحص لحماية الجلسة): {busy}",
+    "en": "⏳ In a running report (skipped to protect the session): {busy}"
+  },
+  "acc_health_keep_note": {
+    "fa": "ℹ️ دکمهٔ حذف فقط اکانت‌های فریز، لاگ‌اوت و مرده را پاک می‌کند. «خطای اتصال» و «در حال ریپورت» حذف نمی‌شوند چون ممکن است مشکل از پروکسی/شبکه باشد.",
+    "ar": "ℹ️ زر الحذف يحذف فقط الحسابات المجمدة والمسجّلة خروجاً والميتة. لا تُحذف حسابات «خطأ الاتصال» و«قيد البلاغ» لأن المشكلة قد تكون من البروكسي/الشبكة.",
+    "en": "ℹ️ The delete button only removes frozen, logged-out and dead accounts. “Connection error” and “in a running report” accounts are kept because the cause may be the proxy/network."
   }
 }

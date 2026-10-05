@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time as _time
+import zlib
 from logging.handlers import RotatingFileHandler
 
 import aiofiles
@@ -119,6 +120,30 @@ db = mongo[NAME_DB]
 ITEMS_PER_PAGE = 5
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis = Redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+UPDATE_DEDUP_TTL = 15 * 60
+
+
+async def _first_delivery(key: str) -> bool:
+    try:
+        return bool(await redis.set(key, "1", ex=UPDATE_DEDUP_TTL, nx=True))
+    except Exception:
+        return True
+
+
+@bot.on(events.CallbackQuery)
+async def _drop_duplicate_callback(event):
+    if not await _first_delivery(f"upd:cb:{event.query.query_id}"):
+        raise events.StopPropagation
+
+
+@bot.on(events.NewMessage(incoming=True))
+async def _drop_duplicate_message(event):
+    if not event.is_private:
+        return
+    if not await _first_delivery(f"upd:msg:{event.chat_id}:{event.id}"):
+        raise events.StopPropagation
+
+
 CTX_TTL = 15 * 60
 EXEC_TTL = 30 * 60
 LOCK_TTL = 12 * 60
@@ -453,14 +478,13 @@ async def _filter_unlocked_sessions(sessions: list[str], uid: int) -> list[str]:
         except Exception:
             pass
         unlocked.append(s)
-    if sessions and not unlocked:
+    if not unlocked:
         logger.warning(
-            "all %s sessions locked for uid=%s — using full list",
+            "all %s sessions busy in a running report uid=%s",
             len(sessions),
             uid,
         )
-        return list(sessions)
-    return unlocked if unlocked else list(sessions)
+    return unlocked
 
 PEER_CACHE: dict[tuple[str, str], object] = {}
 PEER_CACHE_TTL = int(
@@ -963,27 +987,6 @@ def _path_step_from_option(uid: int, option: bytes, options_list=None) -> dict:
         raw_text = (REPORT_OPT_TRANSLATIONS.get(key) or {}).get("en") or ""
     return {"text": text, "raw_text": raw_text, "option": option, "key": key}
 
-# ---------------------------------------------------------------------------
-# Report reasons: the single source of truth for every report flow.
-#
-# Telegram exposes two report APIs and they do not offer the same reasons:
-#
-# * messages.report / stories.report (layer 229): the server returns a menu
-#   (ReportResultChooseOption) and the client answers with the `option` bytes
-#   of the chosen entry. "Scam or fraud" is a top-level entry there, and
-#   "Impersonation" (fake account / fake channel) is one of its sub-entries,
-#   next to "Deceptive or unrealistic financial claims", "Malware, phishing"
-#   and "Fraudulent seller, product or service".
-# * account.reportPeer takes a fixed ReportReason constructor:
-#   Spam, Violence, Pornography, ChildAbuse, Copyright, GeoIrrelevant, Fake,
-#   IllegalDrugs, PersonalDetails, Other. There is NO Scam constructor.
-#
-# So Fake = "Scam or fraud > Impersonation" in the menu API and
-# InputReportReasonFake in reportPeer. Scam = "Scam or fraud > (anything but
-# Impersonation)" in the menu API; reportPeer cannot express it, so a peer
-# level scam report is sent as InputReportReasonOther with an explicit scam
-# description (REPORT_API_LIMIT_SCAM) and never as Fake.
-# ---------------------------------------------------------------------------
 
 REPORT_REASON_CODES = (
     "spam",
@@ -1007,12 +1010,8 @@ class _ReasonSpec:
     def __init__(self, code, label, peer_reason, levels, forbidden_keys=(), forbidden_aliases=()):
         self.code = code
         self.label = label
-        # account.reportPeer constructor, or None when the API has none.
         self.peer_reason = peer_reason
-        # messages.report menu path: one list per level, each entry is
-        # (observed option key, text aliases in en/fa/ar), in preference order.
         self.levels = levels
-        # options that belong to a different reason and must never be chosen.
         self.forbidden_keys = frozenset(forbidden_keys)
         self.forbidden_aliases = tuple(forbidden_aliases)
 
@@ -1158,8 +1157,6 @@ REPORT_REASON_SPECS = {
             [("a2", ("something else", "چیز دیگری", "شيء آخر"))],
         ],
     ),
-    # Supported by account.reportPeer only, and only meaningful for
-    # location-based groups, so it is not offered in the menus.
     "geo": _ReasonSpec(
         "geo",
         "Irrelevant location",
@@ -1201,19 +1198,11 @@ def _option_forbidden_for(code: str | None, o) -> bool:
 
 
 def _pick_reason_option(options, code: str, level: int):
-    """Pick the Telegram menu entry for `code` at menu depth `level`.
-
-    Text is checked first (exact, then contains) because the bytes are opaque
-    server data; the observed option key is the fallback. Entries that belong
-    to another reason (e.g. Impersonation for Scam) are never returned.
-    """
     spec = _reason_spec(code)
     if spec is None or not options or level >= len(spec.levels):
         return None
     allowed = [o for o in options if not _option_forbidden_for(code, o)]
     cands = spec.levels[level]
-    # Candidates are in preference order; for each one try an exact text
-    # match, then a contained alias.
     for _key, aliases in cands:
         folded = {_fold_opt_text(a) for a in aliases}
         hit = next((o for o in allowed if _option_text_folded(o) in folded), None)
@@ -1229,11 +1218,9 @@ def _pick_reason_option(options, code: str, level: int):
 
 
 def _reason_sub_options(options, code: str) -> list:
-    """Menu entries a user may pick for `code` (other reasons filtered out)."""
     return [o for o in (options or []) if not _option_forbidden_for(code, o)]
 
 
-# Root menu entry -> category. Order matters only for the alias pass.
 _ROOT_CATEGORY_RULES = (
     ("child", ("2",), ("child abuse", "سوءاستفاده از کودکان", "إساءة معاملة الأطفال")),
     ("violence", ("3",), ("violence", "خشونت", "عنف")),
@@ -1285,7 +1272,6 @@ def _step_matches(step: dict, aliases, keys=()) -> bool:
 
 
 def _reason_code_from_path(path: list | None) -> str:
-    """Map a recorded menu path (or a pr:<code> peer option) to a reason code."""
     steps = [s for s in (path or []) if isinstance(s, dict)]
     if not steps:
         return "other"
@@ -1324,7 +1310,6 @@ def _reason_code_from_path(path: list | None) -> str:
         return "other"
     if category:
         return category
-    # Unknown menu (different language or layout): look at every step.
     for step in reversed(steps):
         if _step_matches(step, _IMPERSONATION_ALIASES):
             return "fake"
@@ -1348,18 +1333,14 @@ def _reason_code_from_path(path: list | None) -> str:
 
 
 def _peer_reason_for_code(code: str | None):
-    """account.reportPeer reason for `code` -> (ReportReason, api_note)."""
     spec = _reason_spec(code)
     if spec is None:
         return types.InputReportReasonOther(), "UNKNOWN_REASON->Other"
     if spec.peer_reason is None:
-        # Telegram has no InputReportReasonScam; Other + scam text is the
-        # only honest option. Never Fake.
         return types.InputReportReasonOther(), REPORT_API_LIMIT_SCAM
     return spec.peer_reason(), ""
 
 
-# Report modes whose reason is fixed by the menu button itself.
 _MODE_REASON = {"scam": "scam", "fake": "fake"}
 
 
@@ -1474,23 +1455,70 @@ menu_keys = [
     ("menu_ai_analyze", "ai_analyze"),
     ("menu_report_manage", "report_manage"),
 ]
-for key, action in menu_keys:
-    for lang in ["fa", "ar", "en"]:
-        text = TRANSLATIONS[key][lang]
+_LEGACY_MENU_TEXTS = (
+    "ریپورت اسکم | جعلی",
+    "الإبلاغ عن احتيال | مزيف",
+    "Report Scam | Fake",
+)
 
-        MENU_ACTIONS_MAP[text.strip()] = action
-        MENU_ACTIONS_MAP[normalize_menu_text(text)] = action
+
+def _drop_obsolete_menu_overrides() -> None:
+    scam = TEXT_OVERRIDES.get("menu_report_scam")
+    if not isinstance(scam, dict):
+        return
+    stale = [lang for lang, v in scam.items() if isinstance(v, str) and "|" in v]
+    if not stale:
+        return
+    for lang in stale:
+        scam.pop(lang, None)
+    if not scam:
+        TEXT_OVERRIDES.pop("menu_report_scam", None)
+    try:
+        db.settings.update_one(
+            {"key": "text_overrides"}, {"$set": {"value": TEXT_OVERRIDES}}, upsert=True
+        )
+    except Exception as e:
+        logger.warning("menu override cleanup failed: %s", e)
+
+
+def rebuild_menu_actions_map() -> None:
+    fresh: dict[str, str] = {}
+    for legacy in _LEGACY_MENU_TEXTS:
+        fresh[legacy] = "back"
+        fresh[normalize_menu_text(legacy)] = "back"
+    for key, action in menu_keys:
+        for lang in ("fa", "ar", "en"):
+            for text in (
+                (TRANSLATIONS.get(key) or {}).get(lang),
+                (TEXT_OVERRIDES.get(key) or {}).get(lang),
+            ):
+                if isinstance(text, str) and text.strip():
+                    fresh[text.strip()] = action
+                    norm = normalize_menu_text(text)
+                    if norm:
+                        fresh[norm] = action
+    MENU_ACTIONS_MAP.clear()
+    MENU_ACTIONS_MAP.update(fresh)
+
+
+_drop_obsolete_menu_overrides()
+rebuild_menu_actions_map()
+
 
 def txt(uid: int, text_key: str, **kwargs) -> str:
     lang = get_user_lang(uid)
-    text = TEXT_OVERRIDES.get(text_key, {}).get(lang) or TRANSLATIONS.get(
-        text_key, {}
-    ).get(lang, TRANSLATIONS.get(text_key, {}).get(DEFAULT_LANG, text_key))
-    if kwargs:
+    base = TRANSLATIONS.get(text_key) or {}
+    default = base.get(lang, base.get(DEFAULT_LANG, text_key)) if isinstance(base, dict) else text_key
+    text = (TEXT_OVERRIDES.get(text_key) or {}).get(lang) or default
+    if kwargs and isinstance(text, str):
         try:
-            text = text.format(**kwargs)
-        except KeyError:
-            pass
+            return text.format(**kwargs)
+        except (KeyError, IndexError, ValueError):
+            if text is not default and isinstance(default, str):
+                try:
+                    return default.format(**kwargs)
+                except (KeyError, IndexError, ValueError):
+                    return default
     return text
 
 try:
@@ -2556,32 +2584,69 @@ def _fj_channel_url(ch: dict) -> str:
         return f"https://t.me/{uname}"
     return ""
 
-async def check_user_force_joined(user_id: int, ch: dict) -> bool:
+def _channel_chat_ref(ch: dict):
+    chat_ref = ch.get("chat_id") or ch.get("username") or ch.get("id")
+    if not chat_ref:
+        return None
+    ref = str(chat_ref).strip()
+    if ref.lstrip("-").isdigit():
+        return int(ref)
+    return ref
+
+
+async def force_join_status(user_id: int, ch: dict) -> tuple[str, str]:
+    chat_ref = _channel_chat_ref(ch)
+    if chat_ref is None:
+        return "unknown", "NO_CHAT_REF"
     try:
-        chat_ref = ch.get("chat_id") or ch.get("username") or ch.get("id")
-        if not chat_ref:
-            return False
-        try:
-            if str(chat_ref).lstrip("-").isdigit():
-                chat_ref = int(chat_ref)
-        except Exception:
-            pass
         entity = await bot.get_input_entity(chat_ref)
-        await bot(
+        res = await bot(
             functions.channels.GetParticipantRequest(
                 channel=entity, participant=int(user_id)
             )
         )
-        return True
     except errors.UserNotParticipantError:
-        return False
+        return "missing", ""
     except Exception as e:
-        name = e.__class__.__name__.upper()
-        msg = str(e).upper()
-        if "USER_NOT_PARTICIPANT" in name or "USER_NOT_PARTICIPANT" in msg:
-            return False
-        logger.warning("force join check failed uid=%s ch=%s: %s", user_id, ch.get("title"), e)
-        return False
+        name = _tg_error_name(e) if isinstance(e, errors.RPCError) else e.__class__.__name__
+        blob = f"{name} {e.__class__.__name__} {e}".upper()
+        if "USER_NOT_PARTICIPANT" in blob or "USERNOTPARTICIPANT" in blob:
+            return "missing", ""
+        logger.warning(
+            "force join check failed uid=%s ch=%s: %s", user_id, ch.get("title"), name
+        )
+        return "unknown", str(name or "ERROR")[:80]
+    part = getattr(res, "participant", None)
+    if isinstance(part, types.ChannelParticipantLeft):
+        return "missing", ""
+    if isinstance(part, types.ChannelParticipantBanned) and getattr(part, "left", False):
+        return "missing", ""
+    return "member", ""
+
+
+async def _warn_admins_join_check(ch: dict, reason: str) -> None:
+    key = f"jcheck_warn:{ch.get('chat_id') or ch.get('username') or ''}"
+    try:
+        if not await redis.set(key, "1", ex=3600, nx=True):
+            return
+    except Exception:
+        return
+    label = ch.get("title") or ch.get("chat_id") or ch.get("username") or "?"
+    for admin in ADMINS:
+        try:
+            await bot.send_message(
+                admin, txt(admin, "join_check_misconfig", channel=label, error=reason)
+            )
+        except Exception:
+            pass
+
+
+async def check_user_force_joined(user_id: int, ch: dict) -> bool:
+    status, reason = await force_join_status(user_id, ch)
+    if status == "unknown":
+        await _warn_admins_join_check(ch, reason)
+        return True
+    return status == "member"
 
 async def get_missing_force_joins(user_id: int) -> list[dict]:
     cfg = get_force_join()
@@ -2614,12 +2679,14 @@ async def show_force_join_gate(event, uid: int, missing: list[dict] | None = Non
     channels = missing if missing is not None else (cfg.get("channels") or [])
     text = txt(uid, "fj_user_prompt")
     buttons = build_force_join_buttons(uid, channels)
-    try:
-        if hasattr(event, "edit"):
+    if isinstance(event, events.CallbackQuery.Event):
+        try:
             await event.edit(text, buttons=buttons)
             return
-    except Exception:
-        pass
+        except errors.MessageNotModifiedError:
+            return
+        except Exception:
+            pass
     try:
         await event.respond(text, buttons=buttons)
     except Exception:
@@ -2787,16 +2854,161 @@ def _ai_user_prompt(kind: str, target: str = "", reason: str = "") -> str:
         f"{where}"
     )
 
-async def _openai_chat_completion(settings: dict, prompt: str) -> str:
+class AIRequestError(Exception):
+    def __init__(self, status: int, message: str):
+        self.status = int(status or 0)
+        self.message = str(message or "").strip()
+        super().__init__(
+            f"HTTP {self.status}: {self.message}" if self.status else self.message
+        )
+
+
+_AI_COMPLETION_TOKEN_MODELS = ("o1", "o3", "o4", "gpt-5")
+_AI_RETRY_STATUSES = (408, 409, 429, 500, 502, 503, 504)
+
+
+def _ai_base_url(settings: dict) -> str:
+    return (settings.get("base_url") or _AI_DEFAULTS["base_url"]).strip().rstrip("/")
+
+
+def _ai_headers(key: str) -> dict:
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+def _ai_error_message(r) -> str:
+    try:
+        data = r.json()
+    except Exception:
+        return re.sub(r"\s+", " ", (r.text or "")).strip()[:300] or r.reason_phrase
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        parts = [str(err.get("message") or "").strip(), str(err.get("code") or err.get("type") or "").strip()]
+        return " | ".join(p for p in parts if p)[:300]
+    if isinstance(err, str):
+        return err[:300]
+    if isinstance(data, dict) and data.get("message"):
+        return str(data["message"])[:300]
+    return str(data)[:300]
+
+
+def _ai_message_text(data) -> str:
+    try:
+        content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+    except Exception:
+        return ""
+    if isinstance(content, list):
+        content = "".join(
+            str(part.get("text") or "") for part in content if isinstance(part, dict)
+        )
+    return str(content or "").strip()
+
+
+async def _openai_chat(
+    settings: dict,
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    temperature: float,
+    timeout: float = 90.0,
+) -> str:
     key = (settings.get("api_key") or "").strip()
     if not key:
         raise ValueError("NO_API_KEY")
-    base = (settings.get("base_url") or _AI_DEFAULTS["base_url"]).rstrip("/")
     model = (settings.get("model") or _AI_DEFAULTS["model"]).strip()
-    url = f"{base}/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [
+    url = f"{_ai_base_url(settings)}/chat/completions"
+    use_completion_tokens = model.lower().rsplit("/", 1)[-1].startswith(
+        _AI_COMPLETION_TOKEN_MODELS
+    )
+    send_temperature = not use_completion_tokens
+    last_error: AIRequestError | None = None
+    net_failures = 0
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(1, 6):
+            if net_failures >= 2:
+                break
+            payload: dict = {"model": model, "messages": messages}
+            if use_completion_tokens:
+                payload["max_completion_tokens"] = max(max_tokens * 4, 2000)
+            else:
+                payload["max_tokens"] = max_tokens
+            if send_temperature:
+                payload["temperature"] = temperature
+            try:
+                r = await client.post(url, headers=_ai_headers(key), json=payload)
+            except httpx.TimeoutException:
+                net_failures += 1
+                last_error = AIRequestError(0, "TIMEOUT")
+                await asyncio.sleep(2)
+                continue
+            except httpx.HTTPError as e:
+                net_failures += 1
+                last_error = AIRequestError(0, f"CONNECT_FAILED ({e.__class__.__name__})")
+                await asyncio.sleep(2)
+                continue
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except Exception:
+                    raise AIRequestError(200, "INVALID_JSON")
+                return _ai_message_text(data)
+            msg = _ai_error_message(r)
+            low = msg.lower()
+            if r.status_code == 400:
+                if "max_tokens" in low and not use_completion_tokens:
+                    use_completion_tokens = True
+                    continue
+                if "max_completion_tokens" in low and use_completion_tokens:
+                    use_completion_tokens = False
+                    continue
+                if "temperature" in low and send_temperature:
+                    send_temperature = False
+                    continue
+            last_error = AIRequestError(r.status_code, msg)
+            if r.status_code in _AI_RETRY_STATUSES and "quota" not in low and attempt < 5:
+                try:
+                    wait = float(r.headers.get("retry-after") or 0)
+                except Exception:
+                    wait = 0.0
+                await asyncio.sleep(min(20.0, wait or 2.0 * attempt))
+                continue
+            break
+    logger.warning("AI request failed model=%s url=%s: %s", model, url, last_error)
+    raise last_error or AIRequestError(0, "UNKNOWN")
+
+
+def ai_error_text(uid: int, e: Exception) -> str:
+    if isinstance(e, AIRequestError):
+        status = e.status
+        low = e.message.lower()
+        if status == 401:
+            hint = txt(uid, "ai_err_401")
+        elif status == 403 and ("country" in low or "region" in low or "territory" in low):
+            hint = txt(uid, "ai_err_region")
+        elif status == 403:
+            hint = txt(uid, "ai_err_403")
+        elif status == 404:
+            hint = txt(uid, "ai_err_404")
+        elif status == 429 and "quota" in low:
+            hint = txt(uid, "ai_err_quota")
+        elif status == 429:
+            hint = txt(uid, "ai_err_429")
+        elif status >= 500:
+            hint = txt(uid, "ai_err_5xx")
+        elif status == 0:
+            hint = txt(uid, "ai_err_network")
+        else:
+            hint = ""
+        detail = str(e)[:220]
+        return f"{detail}\n{hint}" if hint else detail
+    if isinstance(e, ValueError):
+        return str(e)[:150]
+    return e.__class__.__name__
+
+
+async def _openai_chat_completion(settings: dict, prompt: str) -> str:
+    text = await _openai_chat(
+        settings,
+        [
             {
                 "role": "system",
                 "content": (
@@ -2806,37 +3018,34 @@ async def _openai_chat_completion(settings: dict, prompt: str) -> str:
             },
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.95,
-        "max_tokens": 220,
-    }
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        r = await client.post(url, headers=headers, json=payload)
-        r.raise_for_status()
-        data = r.json()
-    text = (
-        (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
-        or ""
-    ).strip()
+        max_tokens=220,
+        temperature=0.95,
+        timeout=45.0,
+    )
     text = re.sub(r'^["“”\']+|["“”\']+$', "", text).strip()
     if not text:
         raise ValueError("EMPTY_AI_TEXT")
     return text[:4000]
 
+
 async def _openai_list_models(settings: dict) -> list[str]:
     key = (settings.get("api_key") or "").strip()
     if not key:
         raise ValueError("NO_API_KEY")
-    base = (settings.get("base_url") or _AI_DEFAULTS["base_url"]).rstrip("/")
-    url = f"{base}/models"
-    headers = {"Authorization": f"Bearer {key}"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url, headers=headers)
-        r.raise_for_status()
+    url = f"{_ai_base_url(settings)}/models"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(url, headers=_ai_headers(key))
+    except httpx.TimeoutException:
+        raise AIRequestError(0, "TIMEOUT")
+    except httpx.HTTPError as e:
+        raise AIRequestError(0, f"CONNECT_FAILED ({e.__class__.__name__})")
+    if r.status_code != 200:
+        raise AIRequestError(r.status_code, _ai_error_message(r))
+    try:
         data = r.json()
+    except Exception:
+        raise AIRequestError(200, "INVALID_JSON")
     ids = []
     for item in data.get("data") or []:
         mid = item.get("id") if isinstance(item, dict) else None
@@ -2979,8 +3188,6 @@ def init_panel_permissions():
                 actions.append("report_profile")
             value[plan] = actions
             changed = True
-        # Fake used to share the "Scam | Fake" button, so a plan that had
-        # report_scam keeps access to Fake after the split.
         if "report_fake" not in actions and "report_scam" in actions:
             actions.insert(actions.index("report_scam") + 1, "report_fake")
             value[plan] = actions
@@ -3175,40 +3382,20 @@ async def admin_price_menu(event):
     ]
     await event.edit(text, buttons=buttons)
 
-@bot.on(events.CallbackQuery(pattern=b"price_normal|price_special"))
+@bot.on(events.CallbackQuery(pattern=rb"^price_(normal|special)$"))
 async def price_plan_menu(event):
     uid = UID(event)
     if uid not in ADMIN_IDS:
         return
-    plan = event.data.decode().split("_")[1]
-    packages = get_packages(plan)
-    text = txt(uid, "packages_list_title", plan=txt(uid, f"plan_{plan}"))
-    rows = []
-    for idx, pkg in enumerate(packages):
-        days = pkg["days"]
-        price = pkg["price"]
-        max_acc = pkg.get("max_accounts", 0)
-        if plan == "special":
-            label = f"{days} {txt(uid, 'days')} - {price} {txt(uid, 'currency')} - {txt(uid, 'max_accounts_label')}: {max_acc}"
-        else:
-            label = f"{days} {txt(uid, 'days')} - {price} {txt(uid, 'currency')}"
-        rows.append(
-            [
-                Button.inline(label, data=b"noop"),
-                Button.inline(
-                    "❌[5210952531676504517]",
-                    data=f"price_remove:{plan}:{idx}".encode(),
-                ),
-            ]
-        )
-    rows.append(
-        [Button.inline(txt(uid, "add_package_btn"), data=f"price_add:{plan}".encode())]
-    )
-    rows.append([Button.inline(txt(uid, "back_btn"), data=b"set_prices")])
     try:
-        await event.edit(text, buttons=rows)
+        await event.answer()
     except Exception:
-        await event.respond(text, buttons=rows)
+        pass
+    plan = event.data.decode().split("_", 1)[1]
+    try:
+        await send_price_plan_menu(uid, plan, edit_msg=event)
+    except Exception:
+        await send_price_plan_menu(uid, plan)
 
 @bot.on(events.CallbackQuery(pattern=b"price_add:"))
 async def price_add_start(event):
@@ -3235,51 +3422,38 @@ async def price_add_conversation(event):
     if not ctx or ctx.get("mode") != "add_package":
         return
     step = ctx.get("step")
-    plan = ctx["plan"]
-    raw = event.raw_text.strip()
+    plan = ctx.get("plan") or "normal"
+    raw = (event.raw_text or "").strip()
+    try:
+        value = int(raw.replace(",", ""))
+    except ValueError:
+        value = None
+    minimum = 0 if step == "max_accounts" else 1
+    if value is None or value < minimum:
+        await event.reply(txt(uid, "invalid_number"))
+        raise events.StopPropagation
 
     if step == "days":
-        try:
-            days = int(raw)
-            if days <= 0:
-                await event.reply(txt(uid, "invalid_number"))
-                return
-            ctx["days"] = days
-            ctx["step"] = "price"
-            await ctx_set(uid, ctx)
-            await event.reply(txt(uid, "enter_price"))
-        except Exception:
-            await event.reply(txt(uid, "invalid_number"))
+        ctx["days"] = value
+        ctx["step"] = "price"
+        await ctx_set(uid, ctx)
+        await event.reply(txt(uid, "enter_price"))
     elif step == "price":
-        try:
-            price = int(raw)
-            if price <= 0:
-                await event.reply(txt(uid, "invalid_number"))
-                return
-            ctx["price"] = price
-            if plan == "special":
-                ctx["step"] = "max_accounts"
-                await ctx_set(uid, ctx)
-                await event.reply(txt(uid, "enter_max_accounts"))
-            else:
-                add_package(plan, ctx["days"], ctx["price"], 0)
-                await ctx_pop(uid)
-                await event.reply(txt(uid, "package_added"))
-                await price_plan_menu(event)
-        except Exception:
-            await event.reply(txt(uid, "invalid_number"))
-    elif step == "max_accounts":
-        try:
-            max_acc = int(raw)
-            if max_acc < 0:
-                await event.reply(txt(uid, "invalid_number"))
-                raise events.StopPropagation
-            add_package(plan, ctx["days"], ctx["price"], max_acc)
+        ctx["price"] = value
+        if plan == "special":
+            ctx["step"] = "max_accounts"
+            await ctx_set(uid, ctx)
+            await event.reply(txt(uid, "enter_max_accounts"))
+        else:
+            add_package(plan, ctx["days"], value, 0)
             await ctx_pop(uid)
             await event.reply(txt(uid, "package_added"))
-            await price_plan_menu(event)
-        except Exception:
-            await event.reply(txt(uid, "invalid_number"))
+            await send_price_plan_menu(uid, plan)
+    elif step == "max_accounts":
+        add_package(plan, ctx["days"], ctx["price"], value)
+        await ctx_pop(uid)
+        await event.reply(txt(uid, "package_added"))
+        await send_price_plan_menu(uid, plan)
     raise events.StopPropagation
 
 @bot.on(events.CallbackQuery(pattern=b"price_remove:"))
@@ -3288,11 +3462,18 @@ async def price_remove(event):
     if uid not in ADMIN_IDS:
         return
     parts = event.data.decode().split(":")
-    plan = parts[1]
-    idx = int(parts[2])
+    try:
+        plan = parts[1]
+        idx = int(parts[2])
+    except (IndexError, ValueError):
+        await event.answer(txt(uid, "invalid_input"), alert=True)
+        return
     remove_package(plan, idx)
     await event.answer(txt(uid, "package_removed"), alert=True)
-    await price_plan_menu(event)
+    try:
+        await send_price_plan_menu(uid, plan, edit_msg=event)
+    except Exception:
+        await send_price_plan_menu(uid, plan)
 
 async def drop_account(
     session_id: str, reason: str = "unknown_reason", send_notification: bool = True
@@ -3559,7 +3740,10 @@ async def add_accunte(event, conv, phone):
         api_hash_new = user_data["api_hash"]
         phone_new = user_data["phone"].replace(".", "")
         device_profile = _pick_device_profile()
-        proxy_kw = _get_proxy_client_kwargs()
+        login_proxy = pick_proxy_dict(None)
+        proxy_kw = proxy_client_kwargs(login_proxy) if login_proxy else {}
+        if login_proxy and login_proxy.get("id"):
+            user_data["proxy_id"] = login_proxy["id"]
         new_client = TelegramClient(
             StringSession(),
             api_id_new,
@@ -3578,14 +3762,17 @@ async def add_accunte(event, conv, phone):
                         txt(uid, "send_code_prompt"), buttons=conv_cancel_buttons(uid)
                     )
                     code_login = await menu_safe_response(conv)
-                    if not code_login:
-                        return await event.respond(txt(uid, "operation_cancelled"))
-                    code_text = code_login.text.strip().replace(" ", "")
+                    code_text = re.sub(r"\D", "", code_login.raw_text or "")
                     if not re.fullmatch(r"\d{4,8}", code_text):
                         await event.reply(txt(uid, "invalid_code"))
                         return False
                 except errors.rpcerrorlist.PhoneNumberInvalidError:
                     await event.reply(txt(uid, "wrong_number"))
+                    return False
+                except errors.FloodWaitError:
+                    raise
+                except errors.RPCError as e:
+                    await event.reply(txt(uid, "error_occurred", error=_rpc_err_info(e)))
                     return False
                 try:
                     await new_client.sign_in(
@@ -3595,7 +3782,6 @@ async def add_accunte(event, conv, phone):
                     string_session = new_client.session.save()
                     user_data["StringSession"] = string_session
                     user_data["device_profile"] = device_profile
-                    _assign_proxy_to_user_data(user_data)
                     async with aiofiles.open(file_path, "w", encoding="utf-8") as tf:
                         await tf.write(
                             json.dumps(user_data, ensure_ascii=False)
@@ -3607,12 +3793,11 @@ async def add_accunte(event, conv, phone):
                     )
                     password_2fa = await menu_safe_response(conv)
                     try:
-                        await new_client.sign_in(password=password_2fa.text)
+                        await new_client.sign_in(password=(password_2fa.raw_text or "").strip())
                         await event.reply(txt(uid, "login_success"))
                         string_session = new_client.session.save()
                         user_data["StringSession"] = string_session
                         user_data["device_profile"] = device_profile
-                        _assign_proxy_to_user_data(user_data)
                         async with aiofiles.open(
                             file_path, "w", encoding="utf-8"
                         ) as tf:
@@ -3626,6 +3811,11 @@ async def add_accunte(event, conv, phone):
                     ):
                         await event.reply(txt(uid, "wrong_password"))
                         return False
+                    except errors.FloodWaitError:
+                        raise
+                    except errors.RPCError as e:
+                        await event.reply(txt(uid, "error_occurred", error=_rpc_err_info(e)))
+                        return False
                 except errors.PhoneCodeInvalidError:
                     await event.reply(txt(uid, "wrong_login_code"))
                     return False
@@ -3635,19 +3825,28 @@ async def add_accunte(event, conv, phone):
                 except errors.PasswordHashInvalidError:
                     await event.reply(txt(uid, "wrong_2fa_password"))
                     return False
+                except errors.FloodWaitError:
+                    raise
+                except errors.RPCError as e:
+                    await event.reply(txt(uid, "error_occurred", error=_rpc_err_info(e)))
+                    return False
             else:
                 await event.reply(txt(uid, "already_logged_in"))
                 user_data["device_profile"] = device_profile
                 string_session = new_client.session.save()
                 user_data["StringSession"] = string_session
-                _assign_proxy_to_user_data(user_data)
                 return user_data
         except errors.FloodWaitError as e:
             await event.reply(txt(uid, "flood_wait", seconds=e.seconds))
             return False
         finally:
-            await new_client.disconnect()
-    except ConnectionError:
+            await _safe_disconnect(new_client)
+    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+        logger.warning("add account connect failed phone=%s: %s", phone, e.__class__.__name__)
+        try:
+            await event.reply(txt(uid, "error_occurred", error="CONNECT_FAILED"))
+        except Exception:
+            pass
         return False
 
 def _pick_device_profile() -> dict:
@@ -3972,6 +4171,9 @@ def pick_proxy_dict(account_doc: dict | None = None) -> dict | None:
                         if ln.strip() and not ln.startswith("#")
                     ]
                 if lines:
+                    if account_doc and account_doc.get("_id") is not None:
+                        idx = zlib.crc32(str(account_doc["_id"]).encode()) % len(lines)
+                        return parse_proxy_line(lines[idx])
                     return parse_proxy_line(random.choice(lines))
             except Exception:
                 pass
@@ -4234,6 +4436,9 @@ async def _try_connect_authorized(
         except Exception:
             pass
 
+PROBE_EXTRA_LIMIT = int(os.getenv("PROBE_EXTRA_LIMIT", "20"))
+
+
 async def get_first_authorized_client(
     pool: list[str],
 ) -> tuple[str | None, str | None]:
@@ -4243,8 +4448,10 @@ async def get_first_authorized_client(
         return None, "EMPTY_POOL"
     prefer_proxy = bool(list_enabled_proxies())
     order = (True, False) if prefer_proxy else (False, True)
-    reasons = []
-    for sess in pool:
+    per_sess: list[str] = []
+    tally: dict[str, int] = {}
+    for sess in _probe_order(pool):
+        why_by_route = []
         for use_proxy in order:
             ok, why = await _try_connect_authorized(sess, use_proxy=use_proxy)
             tag = "proxy" if use_proxy else "direct"
@@ -4256,8 +4463,10 @@ async def get_first_authorized_client(
                             mark_proxy_ok(user.get("proxy_id"))
                     except Exception:
                         pass
+                _mark_probe_health(sess, "ok", tag)
                 return sess, None
-            reasons.append(f"{tag}={why}")
+            why_by_route.append(why)
+            per_sess.append(f"{sess_phone(sess)}:{tag}={why}")
             if use_proxy:
                 try:
                     user = db["accounts"].find_one({"_id": ObjectId(sess)})
@@ -4265,9 +4474,55 @@ async def get_first_authorized_client(
                         mark_proxy_fail(user.get("proxy_id"))
                 except Exception:
                     pass
-    detail = "; ".join(reasons[:8])
-    logger.error("probe failed pool=%s detail=%s", len(pool), detail)
-    return None, detail or "NO_ACCOUNT"
+            if why in ("NOT_AUTHORIZED", "BAD_SESSION"):
+                break
+        final = why_by_route[-1] if why_by_route else "UNKNOWN"
+        if final in ("NOT_AUTHORIZED", "BAD_SESSION"):
+            _mark_probe_health(sess, "unauthorized", final)
+        tally[final] = tally.get(final, 0) + 1
+    logger.error(
+        "probe failed pool=%s detail=%s", len(pool), "; ".join(per_sess[:20])
+    )
+    summary = ", ".join(f"{k}×{v}" for k, v in sorted(tally.items(), key=lambda kv: -kv[1]))
+    return None, summary or "NO_ACCOUNT"
+
+
+def _probe_order(pool: list[str]) -> list[str]:
+    bad: set[str] = set()
+    try:
+        ids = []
+        for s in pool:
+            try:
+                ids.append(ObjectId(s))
+            except Exception:
+                continue
+        for d in db["accounts"].find(
+            {"_id": {"$in": ids}, "health_status": {"$in": ["unauthorized", "dead", "frozen"]}},
+            {"_id": 1},
+        ):
+            bad.add(str(d["_id"]))
+    except Exception:
+        return list(pool)
+    return [s for s in pool if s not in bad] + [s for s in pool if s in bad]
+
+
+def _mark_probe_health(sess: str, status: str, detail: str) -> None:
+    try:
+        flt = {"_id": ObjectId(sess)}
+        if status == "ok":
+            flt["health_status"] = {"$in": ["unauthorized", "dead"]}
+        db["accounts"].update_one(
+            flt,
+            {
+                "$set": {
+                    "health_status": status,
+                    "health_checked_at": _ts_now(),
+                    "health_detail": str(detail)[:120],
+                }
+            },
+        )
+    except Exception:
+        pass
 
 async def test_proxy_connection(pid: str) -> str:
 
@@ -4297,20 +4552,30 @@ async def resolve_probe_session(event, uid: int, pool: list[str]) -> str | None:
     if sess0:
         return sess0
 
+    tried = len(pool)
     try:
         full_pool = await list_session_files(uid)
     except Exception:
         full_pool = []
-    extra = [s for s in full_pool if s not in set(pool)]
+    pool_set = set(pool)
+    extra = _probe_order([s for s in full_pool if s not in pool_set])[:PROBE_EXTRA_LIMIT]
     if extra:
         sess0b, err2 = await get_first_authorized_client(extra)
         if sess0b:
             return sess0b
-        err = err or err2
+        tried += len(extra)
+        err = "; ".join(x for x in (err, err2) if x)
 
+    try:
+        _free, busy = await report_pool_with_busy(uid)
+    except Exception:
+        busy = 0
     msg = txt(uid, "probe_failed")
-    if err:
-        msg += f"\n({err[:220]})"
+    msg += "\n" + txt(uid, "probe_failed_detail", tried=tried, reasons=(err or "NO_ACCOUNT")[:300])
+    if "NOT_AUTHORIZED" in (err or "") or "BAD_SESSION" in (err or ""):
+        msg += "\n\n" + txt(uid, "probe_hint_unauthorized")
+    if busy > 0:
+        msg += "\n\n" + txt(uid, "accounts_busy_note", busy=busy)
     try:
         await event.respond(msg)
     except Exception:
@@ -4331,12 +4596,36 @@ def set_plus_max_accounts(user_id: int, max_accounts: int) -> bool:
 
 
 async def list_session_files(uid: int, *, include_locked: bool = False) -> list[str]:
+    sessions = await _all_session_files(uid)
+    if include_locked:
+        return sessions
+    return await _filter_unlocked_sessions(sessions, uid)
+
+
+async def report_pool_with_busy(uid: int) -> tuple[list[str], int]:
+    full = await list_session_files(uid, include_locked=True)
+    free = await _filter_unlocked_sessions(full, uid)
+    return free, len(full) - len(free)
+
+
+async def respond_no_free_accounts(event, uid: int, busy: int) -> None:
+    if busy > 0:
+        text = txt(uid, "accounts_all_busy", busy=busy)
+    else:
+        text = txt(uid, "no_session_found")
+    try:
+        await event.respond(text)
+    except Exception:
+        try:
+            await bot.send_message(uid, text)
+        except Exception:
+            pass
+
+
+async def _all_session_files(uid: int) -> list[str]:
     sessions = []
     if uid in ADMIN_IDS:
-        sessions = [str(i["_id"]) for i in db["accounts"].find()]
-        if include_locked:
-            return sessions
-        return await _filter_unlocked_sessions(sessions, uid)
+        return [str(i["_id"]) for i in db["accounts"].find()]
 
     sessions.extend(
         [str(i["_id"]) for i in db["accounts"].find({"admin_id": uid})]
@@ -4414,8 +4703,7 @@ async def list_session_files(uid: int, *, include_locked: bool = False) -> list[
             sessions.extend(
                 [str(i["_id"]) for i in db["accounts"].find({"admin_id": main_id})]
             )
-    sessions = list(dict.fromkeys(sessions))
-    return await _filter_unlocked_sessions(sessions, uid)
+    return list(dict.fromkeys(sessions))
 
 _TG_RESERVED = frozenset(
     {
@@ -4866,8 +5154,6 @@ async def _pick_comment(ctx_snapshot: dict, need_comment: bool = True) -> str:
     )[:4000]
 
 def _build_tg_error_names() -> dict:
-    # Telethon raises e.g. OptionInvalidError whose .message is the generic
-    # "BAD_REQUEST"; map the class back to Telegram's own error string.
     names: dict = {}
     try:
         from telethon.errors import rpcerrorlist as _rpcl
@@ -4888,7 +5174,6 @@ _GENERIC_RPC_MESSAGES = frozenset(
 
 
 def _tg_error_name(e: Exception) -> str:
-    """Telegram's error string (OPTION_INVALID, PEER_ID_INVALID, ...)."""
     name = _TG_ERROR_NAMES.get(type(e))
     if name:
         return name
@@ -4942,7 +5227,6 @@ def _report_rpc_fail(
     sess=None,
     mode=None,
 ) -> str:
-    """Log a failed report call with everything needed to locate the fault."""
     if isinstance(e, errors.FloodWaitError):
         logger.warning(
             "report_rpc_error method=%s error=FLOOD_WAIT seconds=%s reason=%s peer=%s sess=%s",
@@ -5055,7 +5339,6 @@ async def _mark_channel_posts_seen(cli, peer, ids: list[int]) -> None:
 
 
 def _path_is_peer_reason(path: list | None) -> bool:
-    """True when the path holds a pr:<code> option (account.reportPeer menu)."""
     for step in path or []:
         opt = _norm_option(step.get("option")) if isinstance(step, dict) else None
         if opt and bytes(opt).startswith(b"pr:"):
@@ -5064,13 +5347,9 @@ def _path_is_peer_reason(path: list | None) -> bool:
 
 
 def _choose_path_option(options, path: list, step_idx: int, reason_code: str | None):
-    """Option to send at `step_idx`, or None. Never returns an option that
-    belongs to a different reason (e.g. Impersonation while reporting Scam)."""
     if step_idx < len(path):
         choice = _match_report_choice(options, path[step_idx])
     else:
-        # Telegram added a level after the path was recorded: follow the
-        # registry for this reason instead of failing or guessing.
         choice = _pick_reason_option(options, reason_code, step_idx) if reason_code else None
     if choice is not None and reason_code and _option_forbidden_for(reason_code, choice):
         logger.warning(
@@ -5100,7 +5379,6 @@ async def _walk_messages_report(
     if reason_code is None:
         reason_code = _reason_code_from_path(path) if path else None
     if path and _path_is_peer_reason(path):
-        # pr:<code> options only exist for account.reportPeer.
         return await _report_peer_legacy(cli, peer, path, ctx_snapshot, sess_id=sess_id)
 
     if msg_ids is None:
@@ -5214,14 +5492,26 @@ async def _walk_messages_report(
         return False, f"UNEXPECTED:{type(res).__name__}"
     return False, "MAX_STEPS"
 
+def _reportable_ids_in_order(msgs) -> list[int]:
+    incoming: list[int] = []
+    rest: list[int] = []
+    for m in msgs or []:
+        mid = getattr(m, "id", None)
+        if not isinstance(mid, int) or mid <= 0:
+            continue
+        if isinstance(m, types.MessageService) or getattr(m, "action", None) is not None:
+            continue
+        if getattr(m, "out", False):
+            rest.append(mid)
+        else:
+            incoming.append(mid)
+    return incoming + rest
+
+
 async def _pick_reportable_msg_id(cli, peer) -> int | None:
     try:
         msgs = await cli.get_messages(peer, limit=40)
-        found = []
-        for m in msgs or []:
-            mid = getattr(m, "id", None)
-            if isinstance(mid, int) and mid > 0:
-                found.append(mid)
+        found = _reportable_ids_in_order(msgs)
         if found:
             await _mark_channel_posts_seen(cli, peer, found)
             return found[0]
@@ -5241,11 +5531,7 @@ async def _pick_reportable_msg_id(cli, peer) -> int | None:
                 hash=0,
             )
         )
-        found = []
-        for m in getattr(hist, "messages", None) or []:
-            mid = getattr(m, "id", None)
-            if isinstance(mid, int) and mid > 0:
-                found.append(mid)
+        found = _reportable_ids_in_order(getattr(hist, "messages", None))
         if found:
             await _mark_channel_posts_seen(cli, peer, found)
             return found[0]
@@ -5312,9 +5598,6 @@ class _PeerReportOption:
         self.option = option
         self.text = text
 
-# account.reportPeer menu (profile / bot without a message). One entry per
-# reason code; labels are translated via report_options_translations.json
-# ("pr:<code>" keys).
 _PEER_OPTION_LABELS = {
     "spam": "Spam",
     "violence": "Violence",
@@ -5370,7 +5653,6 @@ async def _send_peer_report(
     sess_id: str | None = None,
     mode: str | None = None,
 ) -> tuple[bool, str]:
-    """account.reportPeer with the reason registered for `code`."""
     reason, note = _peer_reason_for_code(code)
     message = _peer_report_message(code, comment, note)
     if note:
@@ -6152,11 +6434,22 @@ async def _resolve_report_notify_input(raw: str) -> tuple[dict | None, str]:
             "username": token,
         }, ""
     if kind == "id" and token:
+        chat_id = str(token)
+        if not chat_id.startswith("-") and chat_id.startswith("100") and len(chat_id) >= 13:
+            chat_id = f"-{chat_id}"
+        title = chat_id
+        username = ""
+        try:
+            ent = await bot.get_entity(int(chat_id))
+            title = (getattr(ent, "title", None) or chat_id)[:80]
+            username = (getattr(ent, "username", None) or "").strip()
+        except Exception as e:
+            logger.warning("notify channel id resolve failed %s: %s", chat_id, e.__class__.__name__)
         return {
-            "chat_id": str(token),
-            "url": "",
-            "title": str(token),
-            "username": "",
+            "chat_id": chat_id,
+            "url": f"https://t.me/{username}" if username else "",
+            "title": title,
+            "username": username,
         }, ""
     if kind != "invite" or not token:
         return None, "report_notify_bad"
@@ -6189,6 +6482,17 @@ async def _resolve_report_notify_input(raw: str) -> tuple[dict | None, str]:
         "username": username,
     }, ""
 
+async def _report_channel_entity(ch: dict):
+    ref = _channel_chat_ref(ch)
+    if ref is None:
+        return None
+    try:
+        return await bot.get_entity(ref)
+    except Exception as e:
+        logger.warning("report channel entity failed ref=%s: %s", ref, e.__class__.__name__)
+        return None
+
+
 async def _report_channel_join_url(ch: dict) -> str:
     url = (ch.get("url") or "").strip()
     if url.startswith("http"):
@@ -6196,22 +6500,37 @@ async def _report_channel_join_url(ch: dict) -> str:
     username = (ch.get("username") or "").strip().lstrip("@")
     if username and not username.lstrip("-").isdigit():
         return f"https://t.me/{username}"
-    peer = _notify_send_target(ch)
-    link = ""
     title = (ch.get("title") or "").strip()
-    try:
-        exported = await bot(functions.messages.ExportChatInviteRequest(peer=peer))
-        link = (getattr(exported, "link", None) or "").strip()
-    except Exception as e:
-        logger.warning("report channel invite export failed: %s", e)
+    link = ""
+    ent = await _report_channel_entity(ch)
+    if ent is not None:
+        title = (getattr(ent, "title", None) or title or "").strip()
+        uname = (getattr(ent, "username", None) or "").strip()
+        if not uname:
+            for u in getattr(ent, "usernames", None) or []:
+                if getattr(u, "active", False) and getattr(u, "username", None):
+                    uname = u.username
+                    break
+        if uname:
+            username = uname
+            link = f"https://t.me/{uname}"
+    if not link and ent is not None:
+        try:
+            full = await bot(functions.channels.GetFullChannelRequest(channel=ent))
+            inv = getattr(full.full_chat, "exported_invite", None)
+            link = (getattr(inv, "link", None) or "").strip()
+        except Exception as e:
+            logger.warning("report channel full info failed: %s", e.__class__.__name__)
+    if not link:
+        try:
+            exported = await bot(
+                functions.messages.ExportChatInviteRequest(peer=ent or _notify_send_target(ch))
+            )
+            link = (getattr(exported, "link", None) or "").strip()
+        except Exception as e:
+            logger.warning("report channel invite export failed: %s", e.__class__.__name__)
     if not link:
         return ""
-    if not title or title.lstrip("-").isdigit():
-        try:
-            ent = await bot.get_entity(peer)
-            title = (getattr(ent, "title", None) or title or "").strip()
-        except Exception:
-            pass
     saved = {
         "chat_id": str(ch.get("chat_id") or ""),
         "url": link,
@@ -6221,7 +6540,35 @@ async def _report_channel_join_url(ch: dict) -> str:
     set_report_notify_channel(saved)
     ch["url"] = link
     ch["title"] = saved["title"]
+    ch["username"] = username
     return link
+
+
+def _report_channel_label(uid: int, ch: dict) -> str:
+    label = str(ch.get("title") or "").strip()
+    if not label or label.lstrip("-").isdigit():
+        username = (ch.get("username") or "").strip().lstrip("@")
+        if username and not username.lstrip("-").isdigit():
+            return f"@{username}"
+        return txt(uid, "report_channel_default_label")
+    return label
+
+
+async def build_report_join_prompt(uid: int, ch: dict) -> tuple[str, list]:
+    url = await _report_channel_join_url(ch)
+    ch = _report_channel_ref() or ch
+    label = _report_channel_label(uid, ch)
+    channel_line = f"{label}\n🔗 {url}" if url else label
+    text = txt(uid, "report_must_join", channel=channel_line)
+    rows = []
+    if url:
+        rows.append([Button.url(txt(uid, "report_join_channel_btn"), url)])
+    else:
+        text += "\n\n" + txt(uid, "report_join_no_link")
+        await _warn_admins_join_check(ch, "NO_JOIN_LINK")
+    rows.append([Button.inline(txt(uid, "report_join_check_btn"), data=b"rnjoin:check")])
+    return text, rows
+
 
 async def ensure_report_channel_member(event, uid: int, *, resume: str | None = None) -> bool:
     if uid in ADMIN_IDS:
@@ -6231,25 +6578,16 @@ async def ensure_report_channel_member(event, uid: int, *, resume: str | None = 
         return True
     if await check_user_force_joined(uid, ch):
         return True
-    url = await _report_channel_join_url(ch)
-    ch = _report_channel_ref() or ch
     if resume:
         prev = await ctx_get(uid) or {}
         prev["pending_report_resume"] = resume
         await ctx_set(uid, prev)
-    rows = []
-    if url:
-        rows.append([Button.url(txt(uid, "report_join_channel_btn"), url)])
-    rows.append([Button.inline(txt(uid, "report_join_check_btn"), data=b"rnjoin:check")])
-    label = ch.get("title") or "کانال گزارش"
-    if str(label).lstrip("-").isdigit():
-        label = "کانال گزارش"
-    text = txt(uid, "report_must_join", channel=label)
+    text, rows = await build_report_join_prompt(uid, ch)
     try:
         await event.respond(text, buttons=rows)
     except Exception:
         try:
-            await event.reply(text, buttons=rows)
+            await bot.send_message(uid, text, buttons=rows)
         except Exception:
             pass
     return False
@@ -6515,8 +6853,6 @@ def build_option_keyboard(
     return rows
 
 def dialog_reason_title(uid: int, options) -> str:
-    """Title for the dialog/profile reason menu; the reportPeer menu also
-    states that Telegram has no Scam reason there."""
     text = txt(uid, "select_report_reason")
     if any(bytes(getattr(o, "option", b"") or b"").startswith(b"pr:") for o in options or []):
         text = f"{text}\n\n{txt(uid, 'peer_reason_scam_note')}"
@@ -7632,11 +7968,16 @@ async def join_request_checker_task():
                         acc["checked_at"] = now_ts
                         changed = True
                         continue
+                    try:
+                        if await is_account_locked(acc["sess"]):
+                            continue
+                    except Exception:
+                        continue
                     cli = retern_client(acc["sess"])
                     if not cli:
                         continue
                     try:
-                        await cli.connect()
+                        await asyncio.wait_for(cli.connect(), timeout=25)
                         if not await cli.is_user_authorized():
                             continue
                         res = await join_group_with_status(
@@ -7930,8 +8271,6 @@ async def sample_step_with_pool_fallback(
         ):
             return status, payload
         if err.startswith("RPC_ERROR:"):
-            # OPTION_INVALID / MESSAGE_ID_INVALID fail the same way on every
-            # account; anything else (PEER_ID_INVALID, ...) may be per-account.
             if any(x in err for x in ("OPTION_INVALID", "MESSAGE_ID_INVALID", "MESSAGE_IDS_EMPTY")):
                 return status, payload
             last = (status, payload)
@@ -8036,8 +8375,6 @@ async def _report_target_posts(
     *,
     reason_code: str,
 ):
-    """messages.report the account's posts with `path`; rejoin once if the
-    account lost access. Returns (ok, info, peer, ids)."""
     ids_list = _pick_msg_ids_for_session(ctx_snapshot, session_id)
     if not ids_list:
         return False, "no_valid_message_ids", peer, ids_list
@@ -8084,15 +8421,6 @@ async def _report_target_posts(
 
 
 async def _run_scam_report(cli, session_id, peer, path, ctx_snapshot, peer_cache):
-    """Scam handler.
-
-    1. messages.report with Telegram's own "Scam or fraud" entry and one of its
-       scam sub-entries (fraudulent seller / phishing / financial claims).
-       "Impersonation" is refused here: that is the Fake handler.
-    2. account.reportPeer on the channel. Telegram has no Scam ReportReason,
-       so this uses InputReportReasonOther with a scam description
-       (REPORT_API_LIMIT_SCAM). It is never sent as Fake.
-    """
     code = _reason_code_from_path(path)
     if code != "scam":
         logger.error(
@@ -8122,11 +8450,6 @@ async def _run_scam_report(cli, session_id, peer, path, ctx_snapshot, peer_cache
 
 
 async def _run_fake_report(cli, session_id, peer, path, ctx_snapshot, peer_cache):
-    """Fake handler (impersonation / fake account or channel).
-
-    1. messages.report with "Scam or fraud" > "Impersonation" only.
-    2. account.reportPeer on the channel with InputReportReasonFake.
-    """
     code = _reason_code_from_path(path)
     if code != "fake":
         logger.error(
@@ -8530,8 +8853,6 @@ async def run_dialog_with_client(
         reason_code = _reason_code_from_path(path) if path else None
 
         if _path_is_peer_reason(path):
-            # The probe had no message, so the user picked an account.reportPeer
-            # reason (pr:<code>); replay exactly that call.
             for _ in range(max(1, rpt)):
                 ok_peer, info_peer = await _report_peer_legacy(
                     cli, peer, path, ctx_snapshot, sess_id=sess_file
@@ -8651,15 +8972,18 @@ async def ask_pool_admin(event, uid):
     ]
     await event.reply(txt(uid, "which_pool"), buttons=btns)
 
-async def ask_num_accounts(event, uid, pool):
+async def ask_num_accounts(event, uid, pool, busy: int = 0):
     max_acc = len(pool)
     if max_acc == 0:
-        await event.reply(txt(uid, "no_accounts_at_all"))
+        await respond_no_free_accounts(event, uid, busy)
         return None
+    prompt = txt(uid, "how_many_accounts", max=max_acc)
+    if busy > 0:
+        prompt += "\n\n" + txt(uid, "accounts_busy_note", busy=busy)
     try:
         async with standard_conversation(uid, timeout=60) as conv:
             await conv.send_message(
-                txt(uid, "how_many_accounts", max=max_acc),
+                prompt,
                 buttons=conv_cancel_buttons(uid),
             )
             resp = await menu_safe_response(conv)
@@ -8687,7 +9011,6 @@ async def ask_num_accounts(event, uid, pool):
     return num
 
 async def _auto_comment_then_start(event, uid, ctx, payload, mode: str):
-    """Scam / Fake: send the sample report's comment automatically, then run."""
     auto_msg = await _pick_comment(ctx, need_comment=True)
     ctx["comment"] = auto_msg
     ctx["comments"] = [auto_msg]
@@ -8787,9 +9110,7 @@ async def _finish_after_comment_source(event, uid, ctx):
             ):
                 await event.respond(txt(uid, "channel_private_hint"))
             else:
-                await event.respond(
-                    txt(uid, "error_occurred", error=err or "COMMENT_FAILED")
-                )
+                await event.respond(_format_wizard_error(uid, err or "COMMENT_FAILED"))
             await ctx_pop(uid)
             return
         try:
@@ -9374,7 +9695,7 @@ async def on_report_run_mode(event: events.CallbackQuery.Event):
         try:
             await event.edit(txt(uid, "cancel"))
         except Exception:
-            await event.respond(txt(uid, "cancel"))
+            pass
         await ctx_pop(uid)
         return
 
@@ -9418,10 +9739,6 @@ async def on_report_run_mode(event: events.CallbackQuery.Event):
                 await conv.send_message(txt(uid, "report_count_received", count=num))
         except MenuInterrupt:
             return
-        except ConversationBusy:
-            await event.respond(txt(uid, "invalid_input"))
-            await ctx_pop(uid)
-            return
         except asyncio.TimeoutError:
             try:
                 await bot.send_message(uid, txt(uid, "timeout_or_invalid"))
@@ -9453,23 +9770,34 @@ async def lang_menu(event):
 @bot.on(events.CallbackQuery(pattern=b"lang:"))
 async def set_lang(event):
     uid = UID(event)
-    lang = event.data.decode().split(":")[1]
+    lang = event.data.decode().split(":", 1)[1]
+    if lang not in ("fa", "ar", "en"):
+        await event.answer(txt(uid, "invalid_input"), alert=True)
+        return
+    await event.answer()
     set_user_lang(uid, lang)
-    await event.edit(txt(uid, "lang_changed"))
+    try:
+        await event.edit(txt(uid, "lang_changed"))
+    except Exception:
+        pass
     welcome = txt(uid, "main_menu_welcome")
     if not await has_access(uid):
         welcome += "\n\n" + txt(uid, "no_access")
     await bot.send_message(uid, welcome, buttons=await kb_main(uid))
 
-@bot.on(events.CallbackQuery(pattern=rb"status:\d+"))
+@bot.on(events.CallbackQuery(pattern=rb"^status:\d+$"))
 async def on_status(event):
-    uid = int(event.data.decode().split(":")[1])
-    raw = await redis.get(f"report_stats:{uid}")
+    viewer = UID(event)
+    owner = int(event.data.decode().split(":")[1])
+    if owner != viewer and viewer not in ADMIN_IDS:
+        await event.answer(txt(viewer, "no_permission"), alert=True)
+        return
+    raw = await redis.get(f"report_stats:{owner}")
     if raw:
         stats = json.loads(raw)
-        await event.answer(_format_report_status(uid, stats), alert=True)
+        await event.answer(_format_report_status(viewer, stats)[:190], alert=True)
     else:
-        await event.answer(txt(uid, "no_stats"), alert=True)
+        await event.answer(txt(viewer, "no_stats"), alert=True)
 
 async def continue_bot_wizard(uid, ctx, event):
     if uid in ADMIN_IDS and not ctx.get("forced_pool"):
@@ -9485,12 +9813,12 @@ async def continue_bot_wizard(uid, ctx, event):
             await ctx_pop(uid)
             return
     else:
-        pool = await list_session_files(uid)
+        pool, busy = await report_pool_with_busy(uid)
         if not pool:
-            await event.respond(txt(uid, "no_session_found"))
+            await respond_no_free_accounts(event, uid, busy)
             await ctx_pop(uid)
             return
-        num = await ask_num_accounts(event, uid, pool)
+        num = await ask_num_accounts(event, uid, pool, busy)
         if num is None:
             await ctx_pop(uid)
             return
@@ -9532,7 +9860,7 @@ async def continue_bot_wizard(uid, ctx, event):
             await event.edit(txt(uid, "path_complete"))
             await start_continuous_report(event, uid, ctx, "bot", need_comment=False)
         else:
-            await event.respond(txt(uid, "error_occurred", error=payload))
+            await event.respond(_format_wizard_error(uid, payload))
             await ctx_pop(uid)
     finally:
         await cli.disconnect()
@@ -9555,12 +9883,12 @@ async def continue_msg_wizard(uid, ctx, event):
             await ctx_pop(uid)
             return
     else:
-        pool = await list_session_files(uid)
+        pool, busy = await report_pool_with_busy(uid)
         if not pool:
-            await event.respond(txt(uid, "no_session_found"))
+            await respond_no_free_accounts(event, uid, busy)
             await ctx_pop(uid)
             return
-        num = await ask_num_accounts(event, uid, pool)
+        num = await ask_num_accounts(event, uid, pool, busy)
         if num is None:
             await ctx_pop(uid)
             return
@@ -9607,12 +9935,12 @@ async def continue_story_wizard(uid, ctx, event):
             await ctx_pop(uid)
             return
     else:
-        pool = await list_session_files(uid)
+        pool, busy = await report_pool_with_busy(uid)
         if not pool:
-            await event.respond(txt(uid, "no_session_found"))
+            await respond_no_free_accounts(event, uid, busy)
             await ctx_pop(uid)
             return
-        num = await ask_num_accounts(event, uid, pool)
+        num = await ask_num_accounts(event, uid, pool, busy)
         if num is None:
             await ctx_pop(uid)
             return
@@ -9668,12 +9996,12 @@ async def continue_dialog_wizard(uid, ctx, event):
             await ctx_pop(uid)
             return
     else:
-        pool = await list_session_files(uid)
+        pool, busy = await report_pool_with_busy(uid)
         if not pool:
-            await event.respond(txt(uid, "no_session_found"))
+            await respond_no_free_accounts(event, uid, busy)
             await ctx_pop(uid)
             return
-        num = await ask_num_accounts(event, uid, pool)
+        num = await ask_num_accounts(event, uid, pool, busy)
         if num is None:
             await ctx_pop(uid)
             return
@@ -9725,7 +10053,7 @@ async def continue_dialog_wizard(uid, ctx, event):
             await event.edit(txt(uid, "path_complete"))
             await start_continuous_report(event, uid, ctx, mode, need_comment=False)
         else:
-            await event.respond(txt(uid, "error_occurred", error=payload))
+            await event.respond(_format_wizard_error(uid, payload))
             await ctx_pop(uid)
     finally:
         await cli.disconnect()
@@ -9739,14 +10067,6 @@ async def _auto_walk_reason(
     choose_at_level: int | None = None,
     allow_user_choice: bool = True,
 ):
-    """Drive the probe account through Telegram's own report menu for `code`.
-
-    Every level is chosen from the options Telegram actually returned, using
-    REPORT_REASON_SPECS; options of another reason are never chosen. At
-    `choose_at_level` (or below the registered levels) the remaining options
-    are handed back as ("choose", options) for the user to pick.
-    Returns sample_step-style (status, payload).
-    """
     status, payload = await sample_step_with_pool_fallback(uid, ctx, pool)
     spec = _reason_spec(code)
     for _ in range(8):
@@ -9797,7 +10117,6 @@ async def _auto_walk_reason(
 
 
 async def _pick_post_report_pool(uid, ctx, event) -> list | None:
-    """Accounts for a post report (forced join pool or user's choice)."""
     if ctx.get("forced_pool"):
         pool_requested = ctx["forced_pool"]
         active_pool = await list_session_files(uid)
@@ -9807,12 +10126,12 @@ async def _pick_post_report_pool(uid, ctx, event) -> list | None:
             await ctx_pop(uid)
             return None
         return selected
-    pool = await list_session_files(uid)
+    pool, busy = await report_pool_with_busy(uid)
     if not pool:
-        await event.respond(txt(uid, "no_session_found"))
+        await respond_no_free_accounts(event, uid, busy)
         await ctx_pop(uid)
         return None
-    num = await ask_num_accounts(event, uid, pool)
+    num = await ask_num_accounts(event, uid, pool, busy)
     if num is None:
         await ctx_pop(uid)
         return None
@@ -9838,9 +10157,6 @@ async def _after_reason_walk(event, uid, ctx, mode: str, status, payload):
 
 
 async def probe_scam_path(event, uid, ctx, selected):
-    """Scam: Telegram's "Scam or fraud" entry, then the user picks the scam
-    type from Telegram's own sub-options (Impersonation is not offered here;
-    that is the Fake report)."""
     ctx["pool"] = selected
     ctx["path"] = []
     sess0 = await resolve_probe_session(event, uid, selected)
@@ -9856,7 +10172,6 @@ async def probe_scam_path(event, uid, ctx, selected):
 
 
 async def probe_fake_path(event, uid, ctx, selected):
-    """Fake: Telegram's "Scam or fraud" > "Impersonation" only."""
     ctx["pool"] = selected
     ctx["path"] = []
     sess0 = await resolve_probe_session(event, uid, selected)
@@ -10197,6 +10512,10 @@ async def on_release_accounts(event):
 @bot.on(events.CallbackQuery(pattern=b"pool_cancel"))
 async def on_pool_cancel(event):
     uid = UID(event)
+    try:
+        await event.answer()
+    except Exception:
+        pass
     await ctx_pop(uid)
     await event.edit(
         txt(uid, "cancel"),
@@ -10212,16 +10531,23 @@ async def on_admin_pool_choice(event):
     if not ctx:
         await event.answer(txt(uid, "admin_session_expired"), alert=True)
         return
+    try:
+        await event.answer()
+    except Exception:
+        pass
     choice = event.data.decode()
     if choice == "pool_mine":
-        pool = [str(a["_id"]) for a in db["accounts"].find({"admin_id": uid})]
+        all_pool = [str(a["_id"]) for a in db["accounts"].find({"admin_id": uid})]
     else:
-        pool = [str(a["_id"]) for a in db["accounts"].find()]
+        all_pool = [str(a["_id"]) for a in db["accounts"].find()]
+    pool = await _filter_unlocked_sessions(all_pool, uid)
+    busy = len(all_pool) - len(pool)
     ctx["pool"] = pool
     await ctx_set(uid, ctx)
     await event.edit(txt(uid, "received"))
-    num = await ask_num_accounts(event, uid, pool)
+    num = await ask_num_accounts(event, uid, pool, busy)
     if num is None:
+        await ctx_pop(uid)
         return
     selected_pool = random.sample(pool, min(num, len(pool)))
     ctx["pool"] = selected_pool
@@ -10250,7 +10576,7 @@ async def on_admin_pool_choice(event):
                 event, uid, ctx, ctx["mode"], need_comment=False
             )
         else:
-            await event.respond(txt(uid, "error_occurred", error=payload))
+            await event.respond(_format_wizard_error(uid, payload))
             await ctx_pop(uid)
     elif ctx["mode"] == "story":
         sess0 = await resolve_probe_session(event, uid, selected_pool)
@@ -10350,7 +10676,7 @@ async def on_admin_pool_choice(event):
                     event, uid, ctx, mode, need_comment=True
                 )
             else:
-                await event.respond(txt(uid, "error_occurred", error=payload))
+                await event.respond(_format_wizard_error(uid, payload))
                 await ctx_pop(uid)
         finally:
             await cli.disconnect()
@@ -10977,11 +11303,11 @@ async def wizard_send_pv(event: events.NewMessage.Event):
             pass
         return
 
-    pool = await list_session_files(uid)
+    pool, busy = await report_pool_with_busy(uid)
     if not pool:
-        await event.respond(txt(uid, "no_session_found"))
+        await respond_no_free_accounts(event, uid, busy)
         return
-    num = await ask_num_accounts(event, uid, pool)
+    num = await ask_num_accounts(event, uid, pool, busy)
     if not num:
         return
     selected = random.sample(pool, min(num, len(pool)))
@@ -10989,38 +11315,21 @@ async def wizard_send_pv(event: events.NewMessage.Event):
 
 AI_ANALYZE_LIMIT = int(os.getenv("AI_ANALYZE_LIMIT", "60"))
 
-# AI verdicts use the same reason codes as every other report flow.
 _AI_REASONS = REPORT_REASON_CODES
 _AI_MODE_FOR_REASON = {"scam": "scam", "fake": "fake"}
 
 async def _openai_chat_raw(
     settings: dict, system: str, user_prompt: str, *, max_tokens: int = 800
 ) -> str:
-    key = (settings.get("api_key") or "").strip()
-    if not key:
-        raise ValueError("NO_API_KEY")
-    base = (settings.get("base_url") or _AI_DEFAULTS["base_url"]).rstrip("/")
-    model = (settings.get("model") or _AI_DEFAULTS["model"]).strip()
-    payload = {
-        "model": model,
-        "messages": [
+    return await _openai_chat(
+        settings,
+        [
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.2,
-        "max_tokens": max_tokens,
-    }
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        r = await client.post(f"{base}/chat/completions", headers=headers, json=payload)
-        r.raise_for_status()
-        data = r.json()
-    return (
-        (((data.get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
-    ).strip()
+        max_tokens=max_tokens,
+        temperature=0.2,
+    )
 
 async def _ai_analyze_channel(target: str, messages: list[tuple[int, str]]) -> list[dict]:
     settings = get_ai_settings()
@@ -11086,7 +11395,7 @@ async def _fetch_channel_messages(
     if not cli:
         return None, None, []
     try:
-        await cli.connect()
+        await asyncio.wait_for(cli.connect(), timeout=25)
         if not await cli.is_user_authorized():
             return None, None, []
         peer = await join_group(cli, target, sess, skip_join=True)
@@ -11162,10 +11471,9 @@ async def wizard_ai_analyze(event: events.NewMessage.Event):
             pass
         return
 
-    pool = await list_session_files(uid)
+    pool, busy = await report_pool_with_busy(uid)
     if not pool:
-        locked_pool = await list_session_files(uid, include_locked=True)
-        if locked_pool:
+        if busy:
             await event.respond(txt(uid, "ai_analyze_accounts_busy"))
         else:
             await event.respond(txt(uid, "no_session_found"))
@@ -11189,12 +11497,11 @@ async def wizard_ai_analyze(event: events.NewMessage.Event):
         if str(e) == "AI_NOT_CONFIGURED":
             await event.respond(txt(uid, "ai_analyze_not_configured"))
         else:
-            await event.respond(txt(uid, "ai_analyze_failed", error=str(e)[:150]))
+            await event.respond(txt(uid, "ai_analyze_failed", error=ai_error_text(uid, e)))
         return
     except Exception as e:
-        await event.respond(
-            txt(uid, "ai_analyze_failed", error=f"{e.__class__.__name__}")
-        )
+        logger.warning("ai analyze failed uid=%s target=%s: %s", uid, target, e)
+        await event.respond(txt(uid, "ai_analyze_failed", error=ai_error_text(uid, e)))
         return
 
     if not findings:
@@ -11206,25 +11513,33 @@ async def wizard_ai_analyze(event: events.NewMessage.Event):
     for f in findings:
         link = _build_post_link(target, username, f["id"])
         lines.append(
-            txt(uid, "ai_analyze_item", link=link, reason=f["reason"], why=f["why"] or "-")
+            txt(uid, "ai_analyze_item", link=link, reason=_reason_label(f["reason"]), why=f["why"] or "-")
         )
     await event.respond("\n".join(lines), link_preview=False)
 
-    num = await ask_num_accounts(event, uid, pool)
+    num = await ask_num_accounts(event, uid, pool, busy)
     if not num:
         return
     selected = random.sample(pool, min(num, len(pool)))
 
-    reportable_ids = [f["id"] for f in findings]
     reason_counts: dict[str, int] = {}
     for f in findings:
         reason_counts[f["reason"]] = reason_counts.get(f["reason"], 0) + 1
     dominant = max(reason_counts, key=reason_counts.get)
+    reportable_ids = [f["id"] for f in findings if f["reason"] == dominant]
+    others = {r: c for r, c in reason_counts.items() if r != dominant}
 
     await event.respond(txt(uid, "ai_analyze_reporting", count=len(reportable_ids)))
+    if others:
+        await event.respond(
+            txt(
+                uid,
+                "ai_analyze_other_reasons",
+                reason=_reason_label(dominant),
+                others=", ".join(f"{_reason_label(r)}: {c}" for r, c in others.items()),
+            )
+        )
 
-    # Each reason keeps its own route: scam -> Scam handler, fake -> Fake
-    # handler, everything else -> the normal post report with that reason.
     ai_mode = _AI_MODE_FOR_REASON.get(dominant, "msg")
     ctx = {
         "mode": ai_mode,
@@ -11327,13 +11642,20 @@ async def wizard_join_request(event: events.NewMessage.Event):
                 await conv.send_message(txt(uid, "invalid_target"))
                 return
 
-            pool = await list_session_files(uid)
+            pool, busy = await report_pool_with_busy(uid)
             if not pool:
-                await conv.send_message(txt(uid, "no_session_found"))
+                await conv.send_message(
+                    txt(uid, "accounts_all_busy", busy=busy)
+                    if busy
+                    else txt(uid, "no_session_found")
+                )
                 return
 
+            jr_prompt = txt(uid, "join_req_num_prompt", max=len(pool))
+            if busy:
+                jr_prompt += "\n\n" + txt(uid, "accounts_busy_note", busy=busy)
             await conv.send_message(
-                txt(uid, "join_req_num_prompt", max=len(pool)),
+                jr_prompt,
                 buttons=conv_cancel_buttons(uid),
             )
             num_resp = await menu_safe_response(conv)
@@ -11519,9 +11841,6 @@ def _conv_key(entity):
 class MenuInterrupt(Exception):
     pass
 
-class ConversationBusy(Exception):
-    pass
-
 class StandardConversation:
     def __init__(
         self, client, entity, timeout=120, *, exclusive=True, clear_ctx_on_menu=True
@@ -11536,8 +11855,18 @@ class StandardConversation:
         self.active = False
 
     async def __aenter__(self):
-        if self.exclusive and self.key in PENDING_CONVERSATIONS:
-            raise ConversationBusy()
+        old = PENDING_CONVERSATIONS.get(self.key)
+        if self.exclusive and old is not None and old is not self and old.active:
+            uid = self.key if isinstance(self.key, int) else UID(self.entity) or 0
+            try:
+                await self.client.send_message(
+                    self.entity,
+                    txt(uid, "conv_busy"),
+                    buttons=conv_cancel_buttons(uid),
+                )
+            except Exception:
+                pass
+            raise MenuInterrupt()
         PENDING_CONVERSATIONS[self.key] = self
         self.active = True
         return self
@@ -11738,9 +12067,14 @@ async def _standard_conversation_router(event):
             await ctx_pop(uid)
         try:
             conv.queue.put_nowait(MenuInterrupt())
-        except Exception:
-            pass
-        raise events.StopPropagation
+        except asyncio.QueueFull:
+            try:
+                conv.queue.get_nowait()
+                conv.queue.put_nowait(MenuInterrupt())
+            except Exception:
+                pass
+        await asyncio.sleep(0.05)
+        return
     try:
         conv.queue.put_nowait(event)
     except asyncio.QueueFull:
@@ -12530,15 +12864,18 @@ async def on_story_select(event: events.CallbackQuery.Event):
 
 @bot.on(events.CallbackQuery(pattern=b"^mr:"))
 async def on_menu_choose(event: events.CallbackQuery.Event):
-    await event.answer()
     uid = UID(event)
     ctx = await ctx_get(uid)
-    if not ctx or ctx["mode"] not in ("msg", "story", "scam", "fake"):
+    if not ctx or ctx.get("mode") not in ("msg", "story", "scam", "fake"):
         await event.answer(txt(uid, "session_not_found"), alert=True)
         return
     data = event.data
     if data == b"mr:cancel":
-        await event.edit(txt(uid, "cancel"))
+        await event.answer()
+        try:
+            await event.edit(txt(uid, "cancel"))
+        except Exception:
+            pass
         await ctx_pop(uid)
         return
     opt = _decode_opt_callback(data, "mr:")
@@ -12551,8 +12888,6 @@ async def on_menu_choose(event: events.CallbackQuery.Event):
     reason_code = _mode_reason_code(mode)
     last_opts = _deserialize_report_options(ctx.get("last_report_options"))
     if reason_code:
-        # Scam / Fake only accept the options they offered (stale or forged
-        # buttons cannot switch a Scam report to Impersonation or back).
         picked = next((o for o in last_opts if o.option == opt), None)
         if picked is None or _option_forbidden_for(reason_code, picked):
             logger.warning(
@@ -12563,6 +12898,7 @@ async def on_menu_choose(event: events.CallbackQuery.Event):
             )
             await event.answer(txt(uid, "invalid_input"), alert=True)
             return
+    await event.answer()
     ctx.setdefault("path", []).append(
         _path_step_from_option(uid, opt, options_list=last_opts or None)
     )
@@ -12722,7 +13058,6 @@ async def dialog_probe(
             return ("choose", _peer_report_options())
         return await _peer_report()
     if next_opt is not None and bytes(_norm_option(next_opt) or b"").startswith(b"pr:"):
-        # The menu shown earlier was the reportPeer one; keep using it.
         return await _peer_report()
     try:
         res = await cli(
@@ -12760,7 +13095,6 @@ async def dialog_probe(
 
 @bot.on(events.CallbackQuery(pattern=b"^db:"))
 async def on_dialog_choose(event: events.CallbackQuery.Event):
-    await event.answer()
     uid = UID(event)
     ctx = await ctx_get(uid)
     mode = (ctx or {}).get("mode")
@@ -12769,10 +13103,11 @@ async def on_dialog_choose(event: events.CallbackQuery.Event):
         return
     data = event.data
     if data == b"db:cancel":
+        await event.answer()
         try:
             await event.edit(txt(uid, "cancel"))
         except Exception:
-            await event.answer(txt(uid, "cancel"), alert=False)
+            pass
         await ctx_pop(uid)
         return
     opt = _decode_opt_callback(data, "db:")
@@ -12781,6 +13116,7 @@ async def on_dialog_choose(event: events.CallbackQuery.Event):
     if not opt:
         await event.answer(txt(uid, "invalid_input"), alert=True)
         return
+    await event.answer()
     sess0 = ctx.get("sample", {}).get("sess")
     if not sess0:
         sess0 = await resolve_probe_session(event, uid, ctx.get("pool") or [])
@@ -12846,10 +13182,10 @@ async def on_dialog_choose(event: events.CallbackQuery.Event):
                 event, uid, ctx, mode, need_comment=True
             )
         else:
-            await event.respond(txt(uid, "error_occurred", error=payload))
+            await event.respond(_format_wizard_error(uid, payload))
             await ctx_pop(uid)
     finally:
-        await cli.disconnect()
+        await _safe_disconnect(cli)
 
 @bot.on(events.NewMessage)
 async def on_dialog_comment(event: events.NewMessage.Event):
@@ -13542,12 +13878,12 @@ async def on_reseller_panel(event):
 @bot.on(events.CallbackQuery(pattern=b"rnjoin:check"))
 async def on_report_join_check(event):
     uid = UID(event)
-    await event.answer()
-    if uid in ADMIN_IDS or not _report_channel_ref():
-        await event.respond(txt(uid, "report_join_ok"))
-        return
     ch = _report_channel_ref()
-    if ch and await check_user_force_joined(uid, ch):
+    if uid in ADMIN_IDS or not ch or await check_user_force_joined(uid, ch):
+        try:
+            await event.answer(txt(uid, "report_join_ok"))
+        except Exception:
+            pass
         ctx = await ctx_get(uid) or {}
         resume = ctx.pop("pending_report_resume", None)
         if ctx:
@@ -13561,7 +13897,15 @@ async def on_report_join_check(event):
         if resume:
             await _continue_after_report_join(event, uid, resume)
         return
-    await ensure_report_channel_member(event, uid, resume=(await ctx_get(uid) or {}).get("pending_report_resume"))
+    try:
+        await event.answer(txt(uid, "report_join_still_missing"), alert=True)
+    except Exception:
+        pass
+    text, rows = await build_report_join_prompt(uid, ch)
+    try:
+        await event.edit(text, buttons=rows)
+    except Exception:
+        pass
 
 @bot.on(events.CallbackQuery(pattern=rb"^rnch:(menu|set|clear)$"))
 async def on_report_notify_channel(event):
@@ -13610,6 +13954,12 @@ async def on_report_notify_channel(event):
             except Exception as e:
                 logger.warning("notify channel test failed: %s", e)
                 await conv.send_message(txt(uid, "report_notify_not_admin", channel=label))
+            saved = _report_channel_ref() or channel
+            join_url = await _report_channel_join_url(saved)
+            if join_url:
+                await conv.send_message(txt(uid, "report_notify_join_link", url=join_url))
+            else:
+                await conv.send_message(txt(uid, "report_notify_no_link", channel=label))
     except MenuInterrupt:
         return
     except asyncio.TimeoutError:
@@ -14004,8 +14354,8 @@ async def force_join_handler(event):
     data = (event.data or b"").decode()
 
     if data == "fj_check":
-        await event.answer()
         if uid in ADMIN_IDS:
+            await event.answer()
             await start_menu(event)
             raise events.StopPropagation
         missing = await get_missing_force_joins(uid)
@@ -14584,13 +14934,13 @@ async def ai_admin_handler(event):
             except Exception as e:
                 logger.warning("AI list models failed: %s", e)
                 try:
-                    await event.respond(txt(uid, "ai_models_fail"))
+                    await event.respond(txt(uid, "ai_models_fail", error=ai_error_text(uid, e)))
                 except Exception:
                     pass
                 return
             if not models:
                 try:
-                    await event.respond(txt(uid, "ai_models_fail"))
+                    await event.respond(txt(uid, "ai_models_fail", error="EMPTY"))
                 except Exception:
                     pass
                 return
@@ -15086,6 +15436,7 @@ async def edit_texts_conversation(event):
             {"key": "text_overrides"}, {"$set": {"value": TEXT_OVERRIDES}}, upsert=True
         )
         TRANSLATIONS.setdefault(chosen["key"], {})[chosen["lang"]] = new_text
+        rebuild_menu_actions_map()
         try:
             async with aiofiles.open("translations.json", "w", encoding="utf-8") as tf:
                 content = json.dumps(TRANSLATIONS, ensure_ascii=False, indent=2)
@@ -15202,58 +15553,54 @@ async def admin_view_user(event):
     )
     await event.edit(txt(uid, "admin_account_list", user_id=target_admin), buttons=rows)
 
+async def read_login_code_text(uid: int, sid: str) -> str:
+    try:
+        user = db["accounts"].find_one({"_id": ObjectId(sid)})
+    except Exception:
+        user = None
+    if not user:
+        return txt(uid, "account_not_found")
+    client = retern_client(sid)
+    if not client:
+        await drop_account(sid, reason="invalid_session")
+        return txt(uid, "session_invalid_deleted")
+    try:
+        await asyncio.wait_for(client.connect(), timeout=25)
+        if not await client.is_user_authorized():
+            await drop_account(sid, reason="unauthorized")
+            return txt(uid, "account_not_logged_in_deleted")
+        messages = await client.get_messages(777000, limit=3)
+        for msg in messages:
+            m = re.search(r"(?<!\d)(\d{5,6})(?!\d)", msg.message or "")
+            if m:
+                return txt(uid, "your_code", code=m.group(1))
+        return txt(uid, "code_not_received")
+    except errors.RPCError as e:
+        if _is_frozen(e) or _is_unauthorized_like(e) or _should_drop_session_error(e):
+            await drop_account(sid, reason="frozen/unauthorized")
+            return txt(uid, "account_frozen_deleted")
+        return txt(uid, "error_occurred", error=_rpc_err_info(e))
+    except asyncio.TimeoutError:
+        return txt(uid, "error_occurred", error="CONNECT_TIMEOUT")
+    except (ConnectionError, OSError):
+        return txt(uid, "error_occurred", error="CONNECT_FAILED")
+    finally:
+        await _safe_disconnect(client)
+
+
 @bot.on(events.CallbackQuery(pattern=b"admin_get_code="))
 async def admin_get_code(event):
     uid = UID(event)
     if uid not in ADMIN_IDS:
         return
-    sid = event.data.decode().split("=")[1]
-    user = db["accounts"].find_one({"_id": ObjectId(sid)})
-    if not user:
-        await event.respond(
-            txt(uid, "account_not_found"), buttons=admin_back_buttons(uid)
-        )
-        return
-    client = retern_client(sid)
-    if not client:
-        await drop_account(sid, reason="invalid_session")
-        await event.respond(
-            txt(uid, "session_invalid_deleted"), buttons=admin_back_buttons(uid)
-        )
-        return
     try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            await drop_account(sid, reason="unauthorized")
-            await event.respond(
-                txt(uid, "account_not_logged_in_deleted"),
-                buttons=admin_back_buttons(uid),
-            )
-            return
-        messages = await client.get_messages(777000, limit=1)
-        msg_txt = txt(uid, "code_not_received")
-        for msg in messages:
-            m = re.search(r"(\d{5})", msg.message or "")
-            if m:
-                msg_txt = txt(uid, "your_code", code=m.group(1))
-                break
-        await event.edit(msg_txt)
-    except errors.RPCError as e:
-        if _is_frozen(e) or _is_unauthorized_like(e):
-            await drop_account(sid, reason="frozen/unauthorized")
-            await event.respond(
-                txt(uid, "account_frozen_deleted"), buttons=admin_back_buttons(uid)
-            )
-        else:
-            await event.respond(
-                txt(uid, "error_occurred", error=e.__class__.__name__),
-                buttons=admin_back_buttons(uid),
-            )
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await event.answer()
+    except Exception:
+        pass
+    sid = event.data.decode().split("=", 1)[1]
+    text = await read_login_code_text(uid, sid)
+    await event.respond(text, buttons=admin_back_buttons(uid))
+    raise events.StopPropagation
 
 @bot.on(events.CallbackQuery(pattern=b"partner_requests_list"))
 async def list_partner_requests(event):
@@ -15438,7 +15785,18 @@ async def handle_accounts_menu(event):
     buttons = get_accounts_buttons_from_sessions(
         sender_id, db, sessions, sender_id, page=0
     )
-    await event.reply(txt(sender_id, "account_list_title"), buttons=buttons)
+    await event.reply(await accounts_list_title(sender_id, sessions), buttons=buttons)
+
+
+async def accounts_list_title(uid: int, sessions: list[str]) -> str:
+    try:
+        free = await _filter_unlocked_sessions(sessions, uid)
+        busy = len(sessions) - len(free)
+    except Exception:
+        busy = 0
+    return txt(uid, "account_list_title") + "\n" + txt(
+        uid, "account_list_count", total=len(sessions), busy=busy
+    )
 
 async def transfer_own(event):
     uid = UID(event)
@@ -15587,7 +15945,22 @@ async def callback_accounts(event):
         buttons = get_accounts_buttons_from_sessions(
             sender_id, db, sessions, sender_id, page
         )
-        await event.edit(txt(sender_id, "account_list_title"), buttons=buttons)
+        await event.edit(
+            await accounts_list_title(sender_id, sessions), buttons=buttons
+        )
+    elif key == "get_code":
+        sid = val
+        allowed = sender_id in ADMIN_IDS
+        if not allowed:
+            try:
+                allowed = sid in set(await list_session_files(sender_id, include_locked=True))
+            except Exception:
+                allowed = False
+        if not allowed:
+            await event.respond(txt(sender_id, "account_not_found"))
+            raise events.StopPropagation
+        text = await read_login_code_text(sender_id, sid)
+        await event.respond(text)
     elif key == "add_new_accounts":
         add_method_buttons = [
             [
@@ -16155,30 +16528,38 @@ async def callback_admin(event):
             return
         await admin_entry(event)
     elif key == "restart_bot":
-        await event.edit(
-            "♻️ ری‌استارت امن شروع شد...\nدر حال توقف عملیات فعال و پاکسازی lockها.",
-            buttons=admin_back_buttons(sender_id),
-        )
         try:
-            await set_stop_flag(sender_id)
-            raw = await redis.get(f"active_pool:{sender_id}")
-            if raw:
-                for sess in json.loads(raw):
-                    await unlock_account(sess)
-            await redis.delete(f"active_pool:{sender_id}")
-            await redis.delete(f"report_active:{sender_id}")
-            await redis.set("bot_pending_restart", str(sender_id), ex=300)
-            await event.reply(
-                "✅ پاکسازی انجام شد. بات تا چند لحظه دیگر ری‌استارت می‌شود.",
+            await event.answer()
+        except Exception:
+            pass
+        try:
+            if not await redis.set("restart_bot_lock", "1", ex=120, nx=True):
+                return
+        except Exception:
+            pass
+        try:
+            await event.edit(
+                "♻️ ری‌استارت امن شروع شد...\nدر حال توقف عملیات فعال و پاکسازی lockها.",
                 buttons=admin_back_buttons(sender_id),
             )
-            await asyncio.sleep(1)
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            pass
+        try:
+            stopped = await stop_all_reports_for_restart()
+            await redis.set("bot_pending_restart", str(sender_id), ex=600)
+            await event.reply(
+                "✅ پاکسازی انجام شد. بات تا چند لحظه دیگر ری‌استارت می‌شود."
+                + (f"\n🛑 ریپورت‌های متوقف‌شده: {stopped}" if stopped else ""),
+            )
         except Exception as e:
-            await event.edit(
+            await redis.delete("restart_bot_lock")
+            await event.respond(
                 txt(sender_id, "restart_error", error=e),
                 buttons=admin_back_buttons(sender_id),
             )
+            return
+        task = asyncio.get_running_loop().create_task(restart_process())
+        _RESTART_TASKS.add(task)
 
     elif key == "manage_purchase_requests":
         pending = get_pending_requests()
@@ -16687,7 +17068,7 @@ async def admin_show_sessions(event):
     uid = UID(event)
     if uid not in ADMIN_IDS:
         return
-    sid = event.data.decode().split("=")[1]
+    sid = event.data.decode().split("=", 1)[1].split(":", 1)[0]
     client = retern_client(sid)
     if not client:
         await event.answer(txt(uid, "session_invalid"), alert=True)
@@ -16699,6 +17080,10 @@ async def admin_show_sessions(event):
             await event.answer(txt(uid, "not_logged_in"), alert=True)
             return
         auths = await client(GetAuthorizationsRequest())
+        try:
+            await event.answer()
+        except Exception:
+            pass
         if not auths.authorizations:
             await event.respond(
                 txt(uid, "no_sessions"), buttons=admin_back_buttons(uid)
@@ -16722,7 +17107,7 @@ async def admin_show_sessions(event):
                 if auth.current
                 else txt(uid, "session_other")
             )
-            label = f"{status} {device} • {location} �� {date_str}"
+            label = f"{status} {device} • {location} • {date_str}"
             if auth.current:
                 rows.append([Button.inline(label, data=b"noop")])
             else:
@@ -16834,9 +17219,12 @@ async def admin_delete_session(event):
     if uid not in ADMIN_IDS:
         return
     sid = event.data.decode().split("=")[1]
+    try:
+        acc = db["accounts"].find_one({"_id": ObjectId(sid)})
+    except Exception:
+        acc = None
     await drop_account(sid, send_notification=False)
     await event.answer(txt(uid, "account_removed"), alert=True)
-    acc = db["accounts"].find_one({"_id": ObjectId(sid)})
     if acc and acc.get("admin_id"):
         admin_id = acc["admin_id"]
         await event.edit(
@@ -16875,7 +17263,7 @@ async def admin_delete_all_user_sessions(event):
             if resp.raw_text.strip() != txt(uid, "yes"):
                 await conv.send_message(txt(uid, "transfer_cancelled"))
                 return
-            accs = db["accounts"].find({"admin_id": target_admin})
+            accs = list(db["accounts"].find({"admin_id": target_admin}, {"_id": 1}))
             deleted = 0
             for acc in accs:
                 await drop_account(str(acc["_id"]), send_notification=False)
@@ -16912,7 +17300,7 @@ async def admin_delete_all_sessions(event):
             if resp.raw_text.strip() != txt(uid, "yes"):
                 await conv.send_message(txt(uid, "transfer_cancelled"))
                 return
-            all_accs = db["accounts"].find({})
+            all_accs = list(db["accounts"].find({}, {"_id": 1}))
             count = 0
             for acc in all_accs:
                 await drop_account(str(acc["_id"]), send_notification=False)
@@ -17139,12 +17527,19 @@ def _format_health_report(uid, total, results: list[dict]) -> str:
         dead=counts.get("dead", 0),
         error=counts.get("error", 0),
     )
+    if counts.get("busy"):
+        text += "\n" + txt(uid, "acc_health_busy_line", busy=counts["busy"])
     if lines_bad:
         chunk = "\n".join(lines_bad[:40])
         if len(lines_bad) > 40:
             chunk += f"\n… +{len(lines_bad) - 40}"
         text += "\n\n" + txt(uid, "acc_health_bad_list") + "\n" + chunk
+    if counts.get("error") or counts.get("busy"):
+        text += "\n\n" + txt(uid, "acc_health_keep_note")
     return text
+
+
+HEALTH_DELETABLE = ("frozen", "unauthorized", "dead")
 
 
 async def run_account_health_scan(event, uid: int):
@@ -17165,8 +17560,20 @@ async def run_account_health_scan(event, uid: int):
     async def one(acc):
         nonlocal done, last_edit
         sid = str(acc["_id"])
-        async with sem:
-            r = await _probe_account_health(sid)
+        try:
+            busy = await is_account_locked(sid)
+        except Exception:
+            busy = False
+        if busy:
+            r = {
+                "sess": sid,
+                "phone": acc.get("phone") or sid[-6:],
+                "status": "busy",
+                "detail": "IN_REPORT",
+            }
+        else:
+            async with sem:
+                r = await _probe_account_health(sid)
         async with lock:
             results.append(r)
             st = r.get("status") or "error"
@@ -17184,7 +17591,7 @@ async def run_account_health_scan(event, uid: int):
 
     await asyncio.gather(*(one(a) for a in accounts))
 
-    bad = [r for r in results if r.get("status") != "ok"]
+    bad = [r for r in results if r.get("status") in HEALTH_DELETABLE]
     await redis.set(
         f"acc_health_bad:{uid}",
         json.dumps(
@@ -17233,7 +17640,7 @@ async def admin_account_health(event):
         deleted = 0
         for item in bad:
             sid = item.get("sess")
-            if not sid:
+            if not sid or item.get("status") not in HEALTH_DELETABLE:
                 continue
             try:
                 await drop_account(
@@ -17268,12 +17675,6 @@ async def ping_all_accounts(event):
 
 
 async def _dry_check_reason(cli, peer, msg_id: int, code: str, root_options):
-    """Follow Telegram's live report menu for `code` without filing a report.
-
-    Only intermediate (parent) options are sent: Telegram answers those with
-    the next menu. The final option is never sent. Returns
-    (status, [(key, text), ...], options_of_last_level).
-    """
     spec = _reason_spec(code)
     options = root_options
     steps: list = []
@@ -17320,7 +17721,6 @@ def _reportcheck_peer_line(code: str) -> str:
 
 @bot.on(events.NewMessage(pattern=r"^/reportcheck(?:@\w+)?(?:\s+(.+))?$"))
 async def report_check_command(event):
-    """Admin: show which Telegram option each reason uses for a real post."""
     uid = UID(event)
     if uid not in ADMIN_IDS:
         return
@@ -17504,19 +17904,30 @@ def main():
             resume_enabled_resellers()
         except Exception as e:
             logger.warning("reseller resume on boot: %s", e)
-    logger.info("Reporter bot is running…")
     loop = bot.loop
+    if not loop.run_until_complete(acquire_instance_lock()):
+        logger.critical(
+            "another instance of this bot is still running with the same token; stop it first"
+        )
+        raise SystemExit(1)
+    logger.info("Reporter bot is running…")
     bg_tasks = [
         loop.create_task(daily_reminder_task()),
         loop.create_task(join_request_checker_task()),
         loop.create_task(crypto_auto_verify_task()),
         loop.create_task(recover_stale_reports()),
+        loop.create_task(instance_lock_keeper()),
+        loop.create_task(announce_restart()),
     ]
 
     async def _graceful_shutdown():
         for t in bg_tasks:
             t.cancel()
         await asyncio.gather(*bg_tasks, return_exceptions=True)
+        try:
+            await release_instance_lock()
+        except Exception:
+            pass
         _close_mongo_quiet()
         try:
             await bot.disconnect()
@@ -17545,6 +17956,111 @@ def main():
             if not t.done():
                 t.cancel()
         _close_mongo_quiet()
+        if _RESTART_REQUESTED:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+async def stop_all_reports_for_restart(wait_seconds: float = 8.0) -> int:
+    live = list(_LIVE_REPORTS)
+    for owner in live:
+        try:
+            await set_stop_flag(owner)
+        except Exception:
+            pass
+    deadline = _time.monotonic() + wait_seconds
+    while _LIVE_REPORTS and _time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
+    try:
+        async for key in redis.scan_iter(match="report_active:*"):
+            try:
+                await clear_report_runtime(int(str(key).rsplit(":", 1)[-1]))
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("restart cleanup: %s", e)
+    return len(live)
+
+
+_RESTART_REQUESTED = False
+_RESTART_TASKS: set = set()
+
+
+async def restart_process():
+    global _RESTART_REQUESTED
+    await asyncio.sleep(0.5)
+    _RESTART_REQUESTED = True
+    try:
+        await release_instance_lock()
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(bot.disconnect(), timeout=20)
+    except Exception:
+        pass
+    _close_mongo_quiet()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+INSTANCE_TOKEN = secrets.token_hex(8)
+INSTANCE_TTL = 30
+
+
+def _instance_key() -> str:
+    return f"bot_instance:{str(bot_token).strip().split(':', 1)[0]}"
+
+
+async def acquire_instance_lock(rounds: int = 9) -> bool:
+    key = _instance_key()
+    for i in range(rounds):
+        try:
+            if await redis.set(key, INSTANCE_TOKEN, ex=INSTANCE_TTL, nx=True):
+                return True
+        except Exception as e:
+            logger.warning("instance lock unavailable: %s", e)
+            return True
+        if i == 0:
+            logger.warning("another bot instance is running; waiting for it to stop")
+        await asyncio.sleep(5)
+    return False
+
+
+async def release_instance_lock():
+    key = _instance_key()
+    if await redis.get(key) == INSTANCE_TOKEN:
+        await redis.delete(key)
+
+
+async def instance_lock_keeper():
+    key = _instance_key()
+    while True:
+        await asyncio.sleep(10)
+        try:
+            cur = await redis.get(key)
+            if cur == INSTANCE_TOKEN:
+                await redis.expire(key, INSTANCE_TTL)
+            elif cur is None:
+                await redis.set(key, INSTANCE_TOKEN, ex=INSTANCE_TTL, nx=True)
+            else:
+                logger.critical("another bot instance with the same token is running")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
+async def announce_restart():
+    try:
+        raw = await redis.get("bot_pending_restart")
+        await redis.delete("bot_pending_restart", "restart_bot_lock")
+    except Exception:
+        return
+    if not raw:
+        return
+    try:
+        admin = int(raw)
+        await bot.send_message(admin, txt(admin, "restart_done"), buttons=admin_back_buttons(admin))
+    except Exception as e:
+        logger.warning("restart notice failed: %s", e)
+
 
 async def recover_stale_reports():
     try:

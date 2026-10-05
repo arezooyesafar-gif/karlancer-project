@@ -73,7 +73,7 @@ report_sent method=messages.report mode=scam reason=scam path=['7', '74'] ...
 
 ```
 pip install -r requirements.txt -r tests/requirements-test.txt
-python -m pytest tests -q            # 59 تست
+python -m pytest tests -q            # 98 تست
 python tests/reason_matrix.py        # جدول نتیجهٔ هر دلیل
 ```
 
