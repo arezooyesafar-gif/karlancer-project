@@ -555,3 +555,53 @@ def test_health_scan_skips_busy_accounts_and_keeps_connection_errors(bot, run, m
     assert sessions[0] not in probed
     bad = json.loads(run(bot.redis.get(f"acc_health_bad:{ADMIN}")))
     assert [b["sess"] for b in bad] == [sessions[2]]
+
+
+def _keyboard_texts(rows):
+    import botmain
+
+    out = []
+    for row in rows:
+        for b in row:
+            inner = getattr(b, "button", b)
+            out.append(botmain.normalize_menu_text(getattr(inner, "text", "")))
+    return out
+
+
+def test_report_manage_button_is_admin_only(bot, run):
+    give_subscription(bot, USER)
+    manage = bot.normalize_menu_text(bot.txt(USER, "menu_report_manage"))
+    assert manage not in _keyboard_texts(run(bot.kb_main(USER)))
+    assert manage in _keyboard_texts(run(bot.kb_main(ADMIN)))
+
+
+def test_special_and_referral_subscribers_do_not_see_accounts(bot, run):
+    bot.PLUS_SUBS_COL.delete_many({})
+    plus_user, ref_user, paid_user = 6161, 7171, 8181
+    run(bot.add_subscription(paid_user, 30, added_by=ADMIN))
+    run(bot.add_subscription(ref_user, 30, added_by=0, note="referral:1x10"))
+    bot.add_plus_subscription(plus_user, 30, 5, ADMIN, ADMIN)
+    try:
+        accounts = bot.normalize_menu_text(bot.txt(USER, "menu_accounts"))
+        assert accounts in _keyboard_texts(run(bot.kb_main(paid_user)))
+        assert accounts not in _keyboard_texts(run(bot.kb_main(ref_user)))
+        assert accounts not in _keyboard_texts(run(bot.kb_main(plus_user)))
+        assert accounts in _keyboard_texts(run(bot.kb_main(ADMIN)))
+    finally:
+        bot.PLUS_SUBS_COL.delete_many({})
+
+
+def test_report_manage_from_old_keyboard_refreshes_menu_for_users(bot, run, monkeypatch):
+    give_subscription(bot, USER)
+    shown = []
+
+    async def menu(event, uid=None):
+        shown.append(uid)
+
+    async def running():
+        raise AssertionError("non-admin must not list reports")
+
+    monkeypatch.setattr(bot, "show_main_menu", menu)
+    monkeypatch.setattr(bot, "list_running_reports", running)
+    run(bot.show_report_manage(FakeEvent()))
+    assert shown == [USER]

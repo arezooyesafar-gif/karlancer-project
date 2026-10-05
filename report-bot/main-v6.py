@@ -6310,12 +6310,12 @@ async def kb_main(uid: int):
                     Button.text(txt(uid, "menu_join_request"), resize=True),
                     Button.text(txt(uid, "menu_send_pv"), resize=True),
                 ],
-                [
-                    Button.text(txt(uid, "menu_ai_analyze"), resize=True),
-                    Button.text(txt(uid, "menu_report_manage"), resize=True),
-                ],
             ]
         )
+        ai_row = [Button.text(txt(uid, "menu_ai_analyze"), resize=True)]
+        if uid in ADMIN_IDS:
+            ai_row.append(Button.text(txt(uid, "menu_report_manage"), resize=True))
+        buttons.append(ai_row)
         if not get_plus_subscription(uid):
             buttons.append([Button.text(txt(uid, "menu_partners"), resize=True)])
         buttons.append(
@@ -10442,11 +10442,10 @@ async def on_stop(event):
 
 async def show_report_manage(event):
     uid = UID(event)
-    if not await has_access(uid) and uid not in ADMIN_IDS:
+    if uid not in ADMIN_IDS:
+        await show_main_menu(event, uid)
         return
     running = await list_running_reports()
-    if uid not in ADMIN_IDS:
-        running = [item for item in running if int(item["uid"]) == int(uid)]
     if not running:
         await event.reply(txt(uid, "report_manage_idle"))
         return
