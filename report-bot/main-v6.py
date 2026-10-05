@@ -3565,16 +3565,14 @@ def _report_log_bits(sess_id: str, ctx_snapshot: dict | None = None, **extra) ->
     return " ".join(bits)
 
 
-def _target_needs_join_prompt(target: str) -> bool:
-    """Join question only for invite / private id — public @ skips it."""
-    kind, _token = _parse_target(target)
-    if kind == "username":
-        return False
-    if kind == "invite":
-        return True
-    if kind == "id":
-        return True
-    return True
+def join_choice_buttons(uid: int) -> list:
+    return [
+        [
+            Button.inline(txt(uid, "join_yes_btn"), b"join_yes"),
+            Button.inline(txt(uid, "join_no_btn"), b"join_no"),
+        ],
+        [Button.inline(txt(uid, "cancel_choice"), b"join_cancel")],
+    ]
 
 
 async def _probe_target_kind(target: str) -> str:
@@ -9663,17 +9661,235 @@ async def start_continuous_report(event, uid, ctx, mode, need_comment):
             await _safe_edit_progress(msg, uid, stats, _state=edit_state)
             try:
                 elapsed = _format_runtime(_report_elapsed_seconds(stats))
+                after_buttons = await report_after_buttons(uid, ctx, pool)
                 await msg.reply(
                     f"✅ عملیات تمام شد.\n"
                     f"✅ موفق: {stats['ok']}\n"
                     f"❌ ناموفق: {stats['failed']}\n"
-                    f"⏱ زمان: {elapsed}"
+                    f"⏱ زمان: {elapsed}",
+                    buttons=after_buttons or None,
                 )
             except Exception:
                 pass
             await ctx_pop(uid)
     finally:
         _LIVE_REPORTS.pop(int(uid), None)
+
+
+AFTER_REPORT_JOB_TTL = 7 * 24 * 3600
+LEAVE_CONCURRENCY = 5
+
+
+def _is_group_target(ctx: dict) -> bool:
+    if (ctx.get("mode") or "") not in ("msg", "scam", "fake"):
+        return False
+    if (ctx.get("entity_kind") or "channel") not in ("channel", "chat"):
+        return False
+    return _parse_target(ctx.get("target") or "")[0] in ("username", "invite", "id")
+
+
+async def report_after_buttons(uid: int, ctx: dict, pool: list) -> list:
+    if not _is_group_target(ctx or {}):
+        return []
+    jid = secrets.token_hex(4)
+    job = {"uid": int(uid), "target": ctx.get("target") or "", "pool": list(pool or [])}
+    try:
+        await redis.set(f"after_job:{jid}", json.dumps(job), ex=AFTER_REPORT_JOB_TTL)
+    except Exception:
+        return []
+    rows = []
+    if not ctx.get("skip_join"):
+        rows.append([Button.inline(txt(uid, "leave_btn"), data=f"leave:{jid}".encode())])
+    rows.append([Button.inline(txt(uid, "target_status_btn"), data=f"tstat:{jid}".encode())])
+    return rows
+
+
+async def _load_after_job(event, uid: int, jid: str) -> dict | None:
+    raw = await redis.get(f"after_job:{jid}")
+    job = None
+    if raw:
+        try:
+            job = json.loads(raw)
+        except Exception:
+            job = None
+    if not job or (int(job.get("uid") or 0) != int(uid) and uid not in ADMIN_IDS):
+        await event.answer(txt(uid, "after_job_expired"), alert=True)
+        return None
+    return job
+
+
+async def _leave_one(sess: str, target: str) -> str:
+    try:
+        if await is_account_locked(sess):
+            return "busy"
+    except Exception:
+        return "busy"
+    cli, _fail = await connect_session_client(sess)
+    if not cli:
+        return "failed"
+    try:
+        peer = await join_group(cli, target, sess, skip_join=True)
+        if not _is_valid_peer(peer):
+            return "not_member"
+        if isinstance(peer, types.InputPeerChat):
+            await cli(
+                functions.messages.DeleteChatUserRequest(
+                    chat_id=peer.chat_id, user_id=types.InputUserSelf()
+                )
+            )
+        else:
+            await cli(functions.channels.LeaveChannelRequest(channel=peer))
+        return "left"
+    except errors.RPCError as e:
+        name = _tg_error_name(e)
+        if name in ("USER_NOT_PARTICIPANT", "CHANNEL_PRIVATE", "CHAT_ADMIN_REQUIRED"):
+            return "not_member"
+        logger.warning("leave failed sess=%s target=%s: %s", sess, target[:80], name)
+        return "failed"
+    except Exception as e:
+        logger.warning("leave failed sess=%s target=%s: %s", sess, target[:80], e.__class__.__name__)
+        return "failed"
+    finally:
+        _peer_cache_pop((sess, target))
+        await _safe_disconnect(cli)
+
+
+async def leave_target_with_pool(target: str, pool: list) -> dict:
+    counts = {"left": 0, "not_member": 0, "busy": 0, "failed": 0}
+    sem = asyncio.Semaphore(LEAVE_CONCURRENCY)
+
+    async def one(sess):
+        async with sem:
+            result = await _leave_one(sess, target)
+        counts[result] = counts.get(result, 0) + 1
+
+    await asyncio.gather(*(one(s) for s in pool))
+    return counts
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^leave:[0-9a-f]{8}$"))
+async def on_leave_target(event):
+    uid = UID(event)
+    jid = event.data.decode().split(":", 1)[1]
+    job = await _load_after_job(event, uid, jid)
+    if not job:
+        return
+    try:
+        if not await redis.set(f"leave_run:{jid}", "1", ex=AFTER_REPORT_JOB_TTL, nx=True):
+            await event.answer(txt(uid, "leave_already"), alert=True)
+            return
+    except Exception:
+        pass
+    await event.answer()
+    target = job.get("target") or ""
+    pool = list(job.get("pool") or [])
+    await event.respond(txt(uid, "leave_started", count=len(pool), target=target))
+    counts = await leave_target_with_pool(target, pool)
+    await event.respond(
+        txt(
+            uid,
+            "leave_done",
+            target=target,
+            left=counts["left"],
+            not_member=counts["not_member"],
+            busy=counts["busy"],
+            failed=counts["failed"],
+        )
+    )
+
+
+def _restriction_text(ent) -> str:
+    reasons = []
+    for r in getattr(ent, "restriction_reason", None) or []:
+        text = (getattr(r, "text", "") or getattr(r, "reason", "") or "").strip()
+        platform = getattr(r, "platform", "") or ""
+        if text:
+            reasons.append(f"{text} ({platform})" if platform else text)
+    return " | ".join(dict.fromkeys(reasons))
+
+
+async def _resolve_target_entity(target: str, pool: list):
+    kind, token = _parse_target(target)
+    if kind == "username" and token:
+        try:
+            return await bot.get_entity(token), ""
+        except (errors.UsernameNotOccupiedError, errors.UsernameInvalidError):
+            return None, "USERNAME_NOT_FOUND"
+        except errors.RPCError as e:
+            name = _tg_error_name(e)
+            if name in ("CHANNEL_PRIVATE", "CHANNEL_INVALID"):
+                return None, name
+        except Exception:
+            pass
+    for sess in pool[:5]:
+        try:
+            if await is_account_locked(sess):
+                continue
+        except Exception:
+            continue
+        cli, _fail = await connect_session_client(sess)
+        if not cli:
+            continue
+        try:
+            peer = await join_group(cli, target, sess, skip_join=True)
+            if not _is_valid_peer(peer):
+                return None, _join_fail_reason(peer) or "NOT_FOUND"
+            return await cli.get_entity(peer), ""
+        except errors.RPCError as e:
+            return None, _tg_error_name(e)
+        except Exception as e:
+            return None, e.__class__.__name__
+        finally:
+            await _safe_disconnect(cli)
+    return None, "NO_FREE_ACCOUNT"
+
+
+async def target_status_text(uid: int, target: str, pool: list) -> str:
+    ent, err = await _resolve_target_entity(target, pool)
+    if ent is None:
+        key = "target_status_gone" if err in ("USERNAME_NOT_FOUND", "CHANNEL_PRIVATE", "CHANNEL_INVALID") else "target_status_unknown"
+        return txt(uid, key, target=target, error=err)
+    yes, no = txt(uid, "yes"), txt(uid, "no")
+    restricted = bool(getattr(ent, "restricted", False))
+    reason = _restriction_text(ent) if restricted else ""
+    return txt(
+        uid,
+        "target_status_result",
+        target=target,
+        title=(getattr(ent, "title", None) or getattr(ent, "first_name", None) or target)[:60],
+        restricted=yes if restricted else no,
+        reason=reason or "—",
+        scam=yes if getattr(ent, "scam", False) else no,
+        fake=yes if getattr(ent, "fake", False) else no,
+    )
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^tstat:[0-9a-f]{8}$"))
+async def on_target_status(event):
+    uid = UID(event)
+    jid = event.data.decode().split(":", 1)[1]
+    job = await _load_after_job(event, uid, jid)
+    if not job:
+        return
+    await event.answer(txt(uid, "target_status_checking"))
+    text = await target_status_text(uid, job.get("target") or "", list(job.get("pool") or []))
+    await event.respond(text)
+
+
+@bot.on(events.NewMessage(pattern=r"^/targetstatus(?:@\w+)?(?:\s+(.+))?$"))
+async def target_status_command(event):
+    uid = UID(event)
+    if uid not in ADMIN_IDS:
+        return
+    raw = ((event.pattern_match.group(1) if event.pattern_match else "") or "").strip()
+    target = normalize_chat_target(raw) if raw else ""
+    if not target or _parse_target(target)[0] == "unknown":
+        await event.respond(txt(uid, "target_status_usage"))
+        raise events.StopPropagation
+    await event.respond(txt(uid, "target_status_checking"))
+    pool = await list_session_files(uid)
+    await event.respond(await target_status_text(uid, target, pool))
+    raise events.StopPropagation
 
 @bot.on(events.CallbackQuery(pattern=b"^runmode:"))
 async def on_report_run_mode(event: events.CallbackQuery.Event):
@@ -10213,15 +10429,26 @@ async def continue_fake_wizard(uid, ctx, event):
 
 @bot.on(events.CallbackQuery(pattern=b"join_yes|join_no|join_cancel"))
 async def on_join_choice(event):
-    await event.answer()
     uid = UID(event)
     ctx = await ctx_get(uid)
     if not ctx or not ctx.get("awaiting_join_choice"):
+        await event.answer()
         return
 
     data = event.data
+    if (
+        data == b"join_no"
+        and ctx.get("mode") in ("msg", "scam", "fake", "story")
+        and _parse_target(ctx.get("target") or "")[0] == "invite"
+    ):
+        await event.answer(txt(uid, "join_private_required"), alert=True)
+        return
+    await event.answer()
     if data == b"join_cancel":
-        await event.edit(txt(uid, "cancel"))
+        try:
+            await event.edit(txt(uid, "cancel"))
+        except Exception:
+            pass
         await ctx_pop(uid)
         return
 
@@ -10881,27 +11108,14 @@ async def _collect_post_report(event, uid: int, mode: str, code: str):
                 "selected_story_ids": set(),
                 "entity_kind": entity_kind,
                 "skip_join": False,
-                "awaiting_join_choice": False,
+                "awaiting_join_choice": True,
                 "awaiting_dest_kind": False,
             }
             await ctx_set(uid, ctx)
-            if not private:
-                try:
-                    await conv.send_message(
-                        txt(uid, "public_username_auto_join", target=join_target)
-                    )
-                except Exception:
-                    pass
-
-        ctx = await ctx_get(uid)
-        if not ctx or ctx.get("mode") != mode:
-            return
-        if mode == "scam":
-            await continue_scam_wizard(uid, ctx, event)
-        elif mode == "fake":
-            await continue_fake_wizard(uid, ctx, event)
-        else:
-            await continue_msg_wizard(uid, ctx, event)
+            await conv.send_message(
+                txt(uid, "join_choice_target", target=shown),
+                buttons=join_choice_buttons(uid),
+            )
     except MenuInterrupt:
         return
     except asyncio.TimeoutError:
@@ -10993,7 +11207,6 @@ async def wizard_story(event: events.NewMessage.Event):
                 else:
                     forced_pool = _raw_accs
 
-            need_join_q = _target_needs_join_prompt(target)
             ctx = {
                 "mode": "story",
                 "target": target,
@@ -11011,32 +11224,13 @@ async def wizard_story(event: events.NewMessage.Event):
                 "forced_pool": forced_pool,
                 "sample": {},
                 "skip_join": False,
-                "awaiting_join_choice": bool(need_join_q),
+                "awaiting_join_choice": True,
             }
             await ctx_set(uid, ctx)
-            if need_join_q:
-                await conv.send_message(
-                    txt(uid, "join_choice"),
-                    buttons=[
-                        [
-                            Button.inline(txt(uid, "yes"), b"join_yes"),
-                            Button.inline(txt(uid, "no"), b"join_no"),
-                            Button.inline(txt(uid, "cancel_choice"), b"join_cancel"),
-                        ]
-                    ],
-                )
-                return
-            try:
-                await conv.send_message(
-                    txt(uid, "public_username_auto_join", target=target)
-                )
-            except Exception:
-                pass
-
-        ctx = await ctx_get(uid)
-        if ctx and ctx.get("mode") == "story" and not ctx.get("awaiting_join_choice"):
-            await continue_story_wizard(uid, ctx, event)
-
+            await conv.send_message(
+                txt(uid, "join_choice_target", target=target),
+                buttons=join_choice_buttons(uid),
+            )
     except MenuInterrupt:
         return
     except asyncio.TimeoutError:

@@ -128,12 +128,13 @@ def translated_tree(lang: str, translations: dict, *, key_map=None):
 
 class FakeTelegram:
 
-    def __init__(self, *, tree=None, valid_ids=None, peer_report_errors=None, reject_options=()):
+    def __init__(self, *, tree=None, valid_ids=None, peer_report_errors=None, reject_options=(), members=None):
         self.tree = tree or TREE
         self.valid_ids = set(valid_ids or VALID_MSG_IDS)
         self.calls = []
         self.peer_report_errors = dict(peer_report_errors or {})
         self.reject_options = set(reject_options)
+        self.members = members
 
     def _option_step(self, option: bytes, message: str):
         key = bytes(option or b"").decode("utf-8", "ignore")
@@ -173,6 +174,11 @@ class FakeTelegram:
             if err is not None:
                 raise err
             return True
+        if isinstance(req, functions.channels.LeaveChannelRequest):
+            self.calls.append(("channels.leave", req.channel))
+            if self.members is not None and not self.members:
+                raise errors.UserNotParticipantError(request=None)
+            return None
         if isinstance(req, functions.account.UpdateStatusRequest):
             return True
         if isinstance(req, functions.messages.GetMessagesViewsRequest):

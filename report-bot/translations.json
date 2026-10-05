@@ -3227,5 +3227,80 @@
     "fa": "ℹ️ دکمهٔ حذف فقط اکانت‌های فریز، لاگ‌اوت و مرده را پاک می‌کند. «خطای اتصال» و «در حال ریپورت» حذف نمی‌شوند چون ممکن است مشکل از پروکسی/شبکه باشد.",
     "ar": "ℹ️ زر الحذف يحذف فقط الحسابات المجمدة والمسجّلة خروجاً والميتة. لا تُحذف حسابات «خطأ الاتصال» و«قيد البلاغ» لأن المشكلة قد تكون من البروكسي/الشبكة.",
     "en": "ℹ️ The delete button only removes frozen, logged-out and dead accounts. “Connection error” and “in a running report” accounts are kept because the cause may be the proxy/network."
+  },
+  "join_choice_target": {
+    "fa": "🔗 هدف: {target}\nآیا اکانت‌ها قبل از ریپورت در این کانال/گروه جوین شوند؟",
+    "ar": "🔗 الهدف: {target}\nهل تنضم الحسابات إلى هذه القناة/المجموعة قبل الإبلاغ؟",
+    "en": "🔗 Target: {target}\nShould the accounts join this channel/group before reporting?"
+  },
+  "join_yes_btn": {
+    "fa": "✅ بله، جوین شوند",
+    "ar": "✅ نعم، انضمام",
+    "en": "✅ Yes, join"
+  },
+  "join_no_btn": {
+    "fa": "🚫 خیر، بدون جوین",
+    "ar": "🚫 لا، بدون انضمام",
+    "en": "🚫 No, don't join"
+  },
+  "join_private_required": {
+    "fa": "🔒 کانال/گروه خصوصی را بدون جوین نمی‌شود ریپورت کرد؛ «بله» را بزن.",
+    "ar": "🔒 لا يمكن الإبلاغ عن قناة/مجموعة خاصة دون الانضمام؛ اختر «نعم».",
+    "en": "🔒 A private channel/group cannot be reported without joining; choose “Yes”."
+  },
+  "leave_btn": {
+    "fa": "🚪 لفت دادن اکانت‌ها از هدف",
+    "ar": "🚪 مغادرة الحسابات للهدف",
+    "en": "🚪 Make accounts leave the target"
+  },
+  "target_status_btn": {
+    "fa": "🔎 بررسی فیلتر شدن هدف",
+    "ar": "🔎 فحص حظر الهدف",
+    "en": "🔎 Check if the target is banned"
+  },
+  "after_job_expired": {
+    "fa": "این دکمه منقضی شده است (بیش از ۷ روز).",
+    "ar": "انتهت صلاحية هذا الزر (أكثر من 7 أيام).",
+    "en": "This button has expired (older than 7 days)."
+  },
+  "leave_already": {
+    "fa": "لفت برای این ریپورت قبلاً انجام شده است.",
+    "ar": "تمت المغادرة لهذا البلاغ مسبقاً.",
+    "en": "Leave was already run for this report."
+  },
+  "leave_started": {
+    "fa": "🚪 در حال لفت دادن {count} اکانت از {target} ...",
+    "ar": "🚪 جارٍ إخراج {count} حساب من {target} ...",
+    "en": "🚪 Making {count} accounts leave {target} ..."
+  },
+  "leave_done": {
+    "fa": "🚪 لفت از {target} تمام شد.\n✅ لفت دادند: {left}\nℹ️ عضو نبودند: {not_member}\n⏳ در ریپورت دیگری مشغول بودند: {busy}\n❌ خطا: {failed}",
+    "ar": "🚪 انتهت المغادرة من {target}.\n✅ غادروا: {left}\nℹ️ لم يكونوا أعضاء: {not_member}\n⏳ مشغولون في بلاغ آخر: {busy}\n❌ خطأ: {failed}",
+    "en": "🚪 Leaving {target} finished.\n✅ Left: {left}\nℹ️ Were not members: {not_member}\n⏳ Busy in another report: {busy}\n❌ Errors: {failed}"
+  },
+  "target_status_checking": {
+    "fa": "🔎 در حال بررسی وضعیت هدف ...",
+    "ar": "🔎 جارٍ فحص حالة الهدف ...",
+    "en": "🔎 Checking the target ..."
+  },
+  "target_status_result": {
+    "fa": "🔎 وضعیت {target}\n📛 {title}\n\n🚫 فیلتر/محدود شده توسط تلگرام: {restricted}\nعلت: {reason}\n💰 برچسب SCAM: {scam}\n🎭 برچسب FAKE: {fake}",
+    "ar": "🔎 حالة {target}\n📛 {title}\n\n🚫 محظور/مقيد من تيليجرام: {restricted}\nالسبب: {reason}\n💰 وسم SCAM: {scam}\n🎭 وسم FAKE: {fake}",
+    "en": "🔎 Status of {target}\n📛 {title}\n\n🚫 Restricted by Telegram: {restricted}\nReason: {reason}\n💰 SCAM label: {scam}\n🎭 FAKE label: {fake}"
+  },
+  "target_status_gone": {
+    "fa": "🔎 {target} دیگر پیدا نمی‌شود ({error}).\nیعنی کانال حذف یا بن شده، یا یوزرنیمش عوض شده است.",
+    "ar": "🔎 لم يعد {target} موجوداً ({error}).\nأي أن القناة حُذفت أو حُظرت أو تغيّر اسم المستخدم.",
+    "en": "🔎 {target} can no longer be found ({error}).\nThe channel was deleted or banned, or its username changed."
+  },
+  "target_status_unknown": {
+    "fa": "🔎 وضعیت {target} مشخص نشد ({error}).",
+    "ar": "🔎 تعذّر تحديد حالة {target} ({error}).",
+    "en": "🔎 Could not check {target} ({error})."
+  },
+  "target_status_usage": {
+    "fa": "استفاده: /targetstatus @channel یا لینک دعوت\nنشان می‌دهد هدف فیلتر شده یا برچسب SCAM/FAKE گرفته یا نه.",
+    "ar": "الاستخدام: /targetstatus @channel أو رابط الدعوة\nيعرض إن كان الهدف محظوراً أو عليه وسم SCAM/FAKE.",
+    "en": "Usage: /targetstatus @channel or an invite link\nShows whether the target is banned or labeled SCAM/FAKE."
   }
 }

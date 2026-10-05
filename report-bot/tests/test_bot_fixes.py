@@ -605,3 +605,120 @@ def test_report_manage_from_old_keyboard_refreshes_menu_for_users(bot, run, monk
     monkeypatch.setattr(bot, "list_running_reports", running)
     run(bot.show_report_manage(FakeEvent()))
     assert shown == [USER]
+
+
+def _post_ctx(bot, mode="msg", **extra):
+    ctx = {
+        "mode": mode,
+        "target": "@target_channel",
+        "entity_kind": "channel",
+        "msg_ids": [10],
+        "path": [],
+        "pool": [],
+        "skip_join": False,
+        "awaiting_join_choice": True,
+    }
+    ctx.update(extra)
+    return ctx
+
+
+@pytest.mark.parametrize("data,skip", [(b"join_yes", False), (b"join_no", True)])
+def test_join_question_decides_skip_join(bot, run, monkeypatch, data, skip):
+    seen = {}
+
+    async def cont(uid, ctx, event):
+        seen["skip_join"] = ctx["skip_join"]
+
+    monkeypatch.setattr(bot, "continue_scam_wizard", cont)
+    run(bot.ctx_set(USER, _post_ctx(bot, "scam")))
+    run(bot.on_join_choice(FakeEvent(data)))
+    assert seen == {"skip_join": skip}
+
+
+def test_private_target_cannot_skip_join(bot, run, monkeypatch):
+    called = []
+
+    async def cont(uid, ctx, event):
+        called.append(1)
+
+    monkeypatch.setattr(bot, "continue_msg_wizard", cont)
+    run(bot.ctx_set(USER, _post_ctx(bot, target="https://t.me/+AbCdEfGhIjKlMnOp")))
+    ev = FakeEvent(b"join_no")
+    run(bot.on_join_choice(ev))
+    assert called == []
+    assert ev.out[0][0] == "answer" and ev.out[0][2].get("alert") is True
+    assert run(bot.ctx_get(USER))["awaiting_join_choice"] is True
+
+
+def test_report_end_offers_leave_and_status(bot, run):
+    rows = run(bot.report_after_buttons(USER, _post_ctx(bot), ["a", "b"]))
+    datas = [getattr(getattr(b, "button", b), "type", None).data for row in rows for b in row]
+    assert [d.split(b":")[0] for d in datas] == [b"leave", b"tstat"]
+    rows = run(bot.report_after_buttons(USER, _post_ctx(bot, skip_join=True), ["a"]))
+    datas = [getattr(getattr(b, "button", b), "type", None).data for row in rows for b in row]
+    assert [d.split(b":")[0] for d in datas] == [b"tstat"]
+    assert run(bot.report_after_buttons(USER, _post_ctx(bot, mode="profile"), ["a"])) == []
+
+
+def test_leave_button_makes_free_accounts_leave(bot, run, monkeypatch):
+    server = mocktg.FakeTelegram()
+    mocktg.wire(bot, server)
+    sessions = add_accounts(bot, 3)
+    run(start_live_report(bot, 999, sessions[:1]))
+    rows = run(bot.report_after_buttons(USER, _post_ctx(bot), sessions))
+    leave = getattr(getattr(rows[0][0], "button", rows[0][0]), "type").data
+    ev = FakeEvent(leave)
+    run(bot.on_leave_target(ev))
+    assert len([c for c in server.calls if c[0] == "channels.leave"]) == 2
+    assert texts(ev)[-1] == bot.txt(USER, "leave_done", target="@target_channel", left=2, not_member=0, busy=1, failed=0)
+    again = FakeEvent(leave)
+    run(bot.on_leave_target(again))
+    assert again.out[0][2].get("alert") is True
+
+
+def test_leave_counts_accounts_that_were_not_members(bot, run):
+    server = mocktg.FakeTelegram(members=set())
+    mocktg.wire(bot, server)
+    sessions = add_accounts(bot, 2)
+    counts = run(bot.leave_target_with_pool("@target_channel", sessions))
+    assert counts == {"left": 0, "not_member": 2, "busy": 0, "failed": 0}
+
+
+def test_target_status_shows_ban_and_labels(bot, run, monkeypatch):
+    async def get_entity(ref):
+        return types.Channel(
+            id=1,
+            title="Bad shop",
+            photo=types.ChatPhotoEmpty(),
+            date=None,
+            access_hash=1,
+            restricted=True,
+            scam=True,
+            restriction_reason=[
+                types.RestrictionReason(platform="all", reason="terms", text="This channel can't be displayed because it violated Telegram's Terms of Service")
+            ],
+        )
+
+    monkeypatch.setattr(bot.bot, "get_entity", get_entity)
+    out = run(bot.target_status_text(USER, "@badshop", []))
+    yes = bot.txt(USER, "yes")
+    assert "Terms of Service" in out and "Bad shop" in out
+    assert out == bot.txt(
+        USER,
+        "target_status_result",
+        target="@badshop",
+        title="Bad shop",
+        restricted=yes,
+        reason="This channel can't be displayed because it violated Telegram's Terms of Service (all)",
+        scam=yes,
+        fake=bot.txt(USER, "no"),
+    )
+
+
+def test_target_status_reports_deleted_channel(bot, run, monkeypatch):
+    async def get_entity(ref):
+        raise errors.UsernameNotOccupiedError(request=None)
+
+    monkeypatch.setattr(bot.bot, "get_entity", get_entity)
+    out = run(bot.target_status_text(USER, "@gone", []))
+    assert out == bot.txt(USER, "target_status_gone", target="@gone", error="USERNAME_NOT_FOUND")
